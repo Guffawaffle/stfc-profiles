@@ -1,0 +1,71 @@
+{
+  "sourceRepository": "https://github.com/Guffawaffle/stfc-mod",
+  "sourceRevision": "323fb857f51f4cb08231d4b150ea8b5bb59340d1",
+  "sourceLicense": "GPL-3.0 license text preserved; no relicensing",
+  "extraction": "Headers and Windows implementation namespaced; include routing changed; runtime behavior preserved. Hook adapter retains host-specific dependencies.",
+  "files": [
+    {
+      "sourcePath": "mods/src/patches/profile_contract.h",
+      "destinationPath": "include/stfc_profiles/legacy_contract.h",
+      "sourceGitBlob": "92d028d97b4149111965dafb770bac7094db124f",
+      "sourceSha256": "96ef77103ae0ec9ea6fcbaad1b63c0846fd0100ac80aa51d6cd7e745f8e964a2",
+      "extractedSha256": "5d1cf34147e6f12e7da0ddc6730f239d69bbe1b1e501b2916241a9981012e30b"
+    },
+    {
+      "sourcePath": "mods/src/patches/profile_selection.h",
+      "destinationPath": "include/stfc_profiles/windows/legacy_selection.h",
+      "sourceGitBlob": "0cf2cf5323624f1999bdbb083596ab341a9ce277",
+      "sourceSha256": "1eaeb6651750f432752cc3a10ea2a7661644d786498d0c5d4971e118d10881fe",
+      "extractedSha256": "2c97ed1d49e1d89386f0a76f13a07d5c606dc96fddd79b63d36b8fb730b540d4"
+    },
+    {
+      "sourcePath": "mods/src/patches/profile_selection.cc",
+      "destinationPath": "src/windows/legacy_selection.cc",
+      "sourceGitBlob": "ba412fab2b48b26b50fd4ceb855654198df1bda4",
+      "sourceSha256": "43f18fb6e85962e7e84798a220aa479a68a08686667c98fd257c554e4542c02f",
+      "extractedSha256": "0407895ad9869efb345272614a3cc2584c5e5e9e5a00b4f1860c6ff1c00915c2"
+    },
+    {
+      "sourcePath": "mods/src/patches/parts/profile_prefs_store.h",
+      "destinationPath": "include/stfc_profiles/windows/prefs_store.h",
+      "sourceGitBlob": "613dbd44838cfd77699bc64b2b910f20055066e6",
+      "sourceSha256": "136e06a56980db19fe7307e092cf2b45960d039393602060f26373f64aed63f4",
+      "extractedSha256": "39e3611ff2f7a853cef7adf503ab438e5758a11374eb9361f1f403fc56e133ef"
+    },
+    {
+      "sourcePath": "mods/src/patches/parts/profile_prefs_store.cc",
+      "destinationPath": "src/windows/prefs_store.cc",
+      "sourceGitBlob": "8ae85f4a41123e9d60739e7e5c0d4d697bdde843",
+      "sourceSha256": "ff53a2ebebc9422a691da18718403d19dfc8d558616e3ff0a9014bcfe6f7d9f9",
+      "extractedSha256": "09ca6b72754cde4f6a352ee12fb99c119384e3e6edf73afac26b2c22971f2bec"
+    },
+    {
+      "sourcePath": "mods/src/patches/parts/profile_isolation_probe.cc",
+      "destinationPath": "adapters/community_mod/profile_isolation.cc",
+      "sourceGitBlob": "24d0d14f130613d10e92bfc8a1929b4973e8a216",
+      "sourceSha256": "bf0932d7a0ef75a9f0020da78a22f8fd1a062ae1bfde1a1bd8ea2fec58207c30",
+      "extractedSha256": "8b7aa017ebb05b68a6522f2e921c4d431566af8d3a7faa21cac488bec1d232aa"
+    },
+    {
+      "sourcePath": "tests/profile_contract_test.cc",
+      "destinationPath": "tests/legacy_contract_test.cc",
+      "sourceGitBlob": "0a425133f32fe48522bbbe2a0e8ca9c65420f8a2",
+      "sourceSha256": "58b12604f726c6303348709b86fb560ae90ec03ba7846187ff9128b9af58cda3",
+      "extractedSha256": "907763f2e0ccd172c321dcae33cb673bd8b9f327d37313c54576ff0baec5b7d4"
+    },
+    {
+      "sourcePath": "tests/profile_prefs_store_test.cc",
+      "destinationPath": "tests/prefs_store_test.cc",
+      "sourceGitBlob": "55104fcf7c7e951dd0b036f73c8942facfacea52",
+      "sourceSha256": "e80853ecb28a95ebec8764c2686b42db492c3d458a52e04a46195a389ffe48c5",
+      "extractedSha256": "385871320c5a4cce82a3344d6a9ef3827dbbb692c2d603c0f3102400f9a8a5d1"
+    },
+    {
+      "sourcePath": "LICENSE",
+      "destinationPath": "LICENSE",
+      "sourceGitBlob": "f288702d2fa16d3cdf0035b15a9fcbc552cd88e7",
+      "sourceSha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "extractedSha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    }
+  ]
+}
