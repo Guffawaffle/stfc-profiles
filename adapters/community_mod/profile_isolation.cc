@@ -3,7 +3,6 @@
 #if _WIN32
 
 #include "il2cpp/method_contract.h"
-#include "stfc_profiles/windows/legacy_selection.h"
 #include "stfc_profiles/windows/prefs_store.h"
 #include "stfc_profiles/community_mod_adapter.h"
 
@@ -234,34 +233,23 @@ void* Resolve(Il2CppClass* cls, const char* name, const char* result, std::initi
 
 } // namespace
 
-void PrepareLegacyProfile()
+void PrepareProfile(std::wstring_view id, ProfileOpenMode mode)
 {
-  const auto& selection = ResolveProfileSelection();
-  if (!selection.marked)
-    return;
-
-  profile_id = selection.id;
+  if (profile_store)
+    FailClosed("Profile preference store was already prepared");
+  profile_id = id;
   const auto local_app_data = KnownFolder(FOLDERID_LocalAppData);
   if (local_app_data.empty())
-    AbortProfileLaunch("Local app data is unavailable");
-  const auto open_mode = !selection.enroll ? ProfileOpenMode::Existing
-                         : selection.resume ? ProfileOpenMode::Resume
-                                            : ProfileOpenMode::New;
+    FailClosed("Local app data is unavailable");
   try {
-    profile_store = std::make_unique<ProfilePrefsStore>(local_app_data, profile_id, open_mode);
+    profile_store = std::make_unique<ProfilePrefsStore>(local_app_data, profile_id, mode);
   } catch (...) {
-    AbortProfileLaunch("Could not open the isolated preference store");
+    FailClosed("Could not open the isolated preference store");
   }
-  // The store lock is held before publishing a pending enrollment. No
-  // PlayerPrefs hook can write a bin until the pending receipt is durable.
-  if (selection.enroll)
-    StartProfileEnrollment();
 }
 
-void InstallLegacyProfileHooks()
+void InstallProfileHooks()
 {
-  if (!ResolveProfileSelection().marked)
-    return;
   if (!profile_store)
     FailClosed("Profile preference store was not prepared");
 
@@ -332,7 +320,6 @@ void InstallLegacyProfileHooks()
   }
   try {
     profile_store->FinishNewProfile();
-    CompleteProfileEnrollment();
   } catch (...) {
     FailClosed("Could not finish profile enrollment");
   }

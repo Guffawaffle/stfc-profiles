@@ -1,35 +1,28 @@
 # STFC Profiles
 
-Shared profile code for Star Trek Fleet Command, extracted from the Windows
-community-mod profile isolation candidate. This repository owns the reusable
-library, compatibility adapters and future profile-only distribution.
+Shared STFC profile identity, encrypted Windows preference storage and game hook
+adapter code. This is development source; a standalone player DLL and explicit
+launch runtime are still being implemented.
 
-**Status: initial source extraction, not a player download.** The Windows core
-builds and its inherited tests run independently of the community mod. The
-current adapter still needs the mod's IL2CPP/SPUD host. There is no standalone
-`version.dll`, launcher CLI or shared-install runtime implementation here yet.
+## Components
 
-## Composition
+- `stfc-profiles-core`: static library containing ID validation and Windows
+  DPAPI preference storage, with per-profile writer exclusion.
+- Community-mod adapter: takes a profile ID and store mode explicitly from its
+  host, then installs preference and browser hooks through IL2CPP/SPUD.
+- Bridge: owns its JSON profile registry and supplies the requested ID at launch.
 
-| Component | Responsibility | Current state |
-| --- | --- | --- |
-| `stfc-profiles-core` | ID/receipt contract, Windows selection/enrollment and encrypted preferences | Independent static library |
-| Community-mod adapter | Validates and installs preference/browser hooks through the host | Extracted compatibility source |
-| Profile-only bootstrap | Loads the game interfaces and invokes the same profile code | Planned |
-| Bridge | Profile selection, shortcuts, lifecycle and readiness | Separate repository |
+The profile-only tool and community mod are mutually exclusive distributions in
+one game installation. Both will compile the same pinned library into their
+single bootstrap DLL. Installing capability does not activate a profile;
+ordinary launches retain ordinary state and named launches isolate or fail.
 
-The intended distributions are mutually exclusive in each game installation:
-install the profile-only tool **or** the community mod. Both will compile the
-same pinned library into their own single bootstrap DLL. Users will not install
-both DLLs together. The community mod will consume an immutable source revision
-from this repository, with an explicit local source override for development.
+The installation-marker selector, path-bound enrollment receipts and compatibility
+wrapper have been deleted. No migration or fallback implementation is retained.
+The host must supply the requested profile ID and an explicit `New`, `Resume` or
+`Existing` store mode. An existing store is not silently replaced by a new one.
 
-Installing the capability will not activate a profile. In the intended
-shared-install contract, ordinary game launches retain ordinary OS-user state;
-an explicit named-profile launch must isolate that exact profile or fail. CLI
-arguments and shortcuts are still proposed contracts, not working commands.
-
-## Build and check on Windows
+## Build
 
 Use native Windows XMake, Visual Studio C++ and PowerShell 7:
 
@@ -37,34 +30,20 @@ Use native Windows XMake, Visual Studio C++ and PowerShell 7:
 pwsh -NoLogo -NoProfile -File .\scripts\Test.ps1
 ```
 
-The script builds the library, runs the legacy contract and encrypted-store
-tests, and builds/runs the separate consumer project. Tests use synthetic data
-in disposable temporary directories. They do not touch game installations.
-
-Optional adapter compilation uses an explicit community-mod source root:
+The existing identity/store checks and separate consumer project use synthetic
+state. Optional adapter compilation uses an explicit host root:
 
 ```powershell
-xmake f -p windows -a x64 -m release --community_mod_root=D:/dev/stfc-mod -y
-xmake build -y stfc-profiles-community-mod-adapter
+pwsh -NoLogo -NoProfile -File .\scripts\Test.ps1 -CommunityModRoot D:/dev/stfc-mod
 ```
 
-That checks compilation against host headers; it does not link a full mod or
-qualify game runtime behavior. See [integration guidance](docs/INTEGRATION.md).
+Adapter archive compilation does not qualify a game runtime. See
+[integration](docs/INTEGRATION.md) and [remaining work](docs/ROADMAP.md).
+macOS storage/loading qualification remains open.
 
-## Compatibility boundary
+## License and source
 
-The initial extraction preserves `v1:<id>` installation markers, V2 enrollment
-receipts, preference-store schema 1, DPAPI identity binding and existing lock
-behavior. The legacy selector binds an installation to a profile; it is not the
-new shared-install selector. No migration or format change is introduced here.
-
-Windows tests do not establish macOS storage/loading parity. The initial
-header-only ID/receipt contract is portable; platform implementations still
-require separate qualification. See [the work sequence](docs/ROADMAP.md).
-
-## Source and license
-
-Extracted from [Guffawaffle/stfc-mod](https://github.com/Guffawaffle/stfc-mod)
-at `323fb857f51f4cb08231d4b150ea8b5bb59340d1`. Existing license text and attribution
-are retained. [Provenance](docs/PROVENANCE.json) records original blob identities
-and source/extracted file hashes. See [LICENSE](LICENSE) for GPL version 3 terms.
+Derived from [Guffawaffle/stfc-mod](https://github.com/Guffawaffle/stfc-mod) at
+`323fb857f51f4cb08231d4b150ea8b5bb59340d1`. License text and attribution are retained.
+[Provenance](docs/PROVENANCE.json) records original and current file identities;
+[LICENSE](LICENSE) contains GPL version 3 terms.

@@ -1,67 +1,38 @@
-# Consuming the extraction
+# Source integration
 
-## Core
-
-Checkout or vendor an immutable reviewed commit of `Guffawaffle/stfc-profiles`.
-Verify its full commit ID before configuring a release build. Include the narrow
-library declaration rather than the repository's root project:
+Consume an immutable reviewed revision of `Guffawaffle/stfc-profiles`:
 
 ```lua
 includes("<pinned-source>/xmake/library.lua")
-
 target("your-product")
     add_deps("stfc-profiles-core")
 target_end()
 ```
 
-This imports only the static library and public include/system-link requirements.
-It does not import tests, optional package repositories or a bootstrap. The
-consumer chooses compatible compiler/runtime settings. The checked example uses
-C++23 and the Windows static C runtime. Public entry points live under
-`include/stfc_profiles`; the example calls library identity and legacy ID logic.
+This declares only the static library and its public include/system-link
+requirements. Consumers choose compatible compiler/runtime settings. The separate
+`examples/consumer` project uses C++23 and the Windows static C runtime; invoke
+XMake with `-P .` in that directory to select its own project.
 
-`examples/consumer` is an independent XMake project. Run XMake with `-P .` in that
-directory so parent-project discovery does not select this repository's root.
+## Host interface
 
-## Legacy community-mod adapter
+Compile `adapters/community_mod/profile_isolation.cc` exactly once, link the core
+and provide the host's validated IL2CPP helpers, SPUD, eastl and spdlog.
+The host owns the single early `il2cpp_init` hook:
 
-The adapter preserves the existing candidate's host seam. It depends on the
-host's validated IL2CPP method helpers, SPUD detours and spdlog, and owns the
-preference/browser hooks. The product host remains responsible for its single
-early `il2cpp_init` hook:
+1. For a named request, call `stfc::profiles::community_mod::PrepareProfile(id, mode)`
+   before the original initializer. The ID and `windows::ProfileOpenMode` are
+   explicit inputs. Caller-owned lifecycle state determines the mode.
+2. Call `InstallProfileHooks()` after the original returns and before account
+   startup continues. Preparation and hook failures stop the process.
+3. For ordinary launch, invoke neither profile adapter function.
 
-1. Invoke `stfc::profiles::community_mod::PrepareLegacyProfile()` before the
-   original `il2cpp_init` call.
-2. Invoke `InstallLegacyProfileHooks()` after that call returns and before game
-   account startup continues.
+The old selector, enrollment API and global forwarding entry points are removed.
+Replace their callers rather than adding shims. There is no implicit selection,
+installation binding, fallback or migration API. The DPAPI store's schema and
+per-ID protection remain; missing established stores still reject `Existing`.
 
-Failures retain the source candidate's process-termination behavior. This is
-compatibility code, not a general runtime interface for the future bootstrap.
-
-For a mod consumer, compile `adapters/community_mod/profile_isolation.cc` exactly
-once, link `stfc-profiles-core`, and provide the host include directories plus
-its existing eastl/spdlog/SPUD packages. Replace the old definitions of selection,
-store and hook implementation; do not compile both copies. For an initial
-integration, `integration/community_mod/legacy_compat.cc` forwards the old global
-hook entry points to the extracted namespace. Replace old selection includes and
-calls with `stfc_profiles/windows/legacy_selection.h` and its namespace. The mod's
-Config/patch bootstrap must then reference that shared selection instance.
-
-The optional `stfc-profiles-community-mod-adapter` archive is a compile fixture
-against an explicit local host root. It does not produce a DLL or prove hook
-ordering in a running game. This extraction has not modified or integrated the
-active community-mod checkout.
-
-## Pinning and product boundaries
-
-Release consumers record the source URL, full Git revision and build/toolchain
-inputs in their own dependency lock and release evidence. A local source override
-must be explicit and identified in build evidence; a moving branch is not a
-release pin. The library's embedded extraction-source revision describes its
-historical origin, not the consuming repository's dependency lock.
-
-The future profile-only product supplies its own minimal Windows loader and
-validated game-interface adapter. It must not import unrelated mod features or
-reuse the full mod bootstrap as a hidden dependency. Both products own one
-bootstrap and one copy of each hook. Build success is not permission to deploy,
-enroll an existing account, migrate receipts or change stored profile identity.
+The optional adapter archive checks compilation against an explicit host source
+root. Full mod integration and a minimal standalone bootstrap remain open.
+Record the exact dependency revision, toolchain and any development override;
+a moving branch or personal path must not become a release pin.

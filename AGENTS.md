@@ -11,8 +11,8 @@ account preferences, browser profiles or enrollment receipts into fixtures.
 
 Profile-only and full-mod deployments are mutually exclusive within one game
 installation. Installing capability does not activate isolation for ordinary
-launches. Explicit profile requests must isolate or fail. Legacy marker behavior
-is compatibility evidence, not the final shared-install contract.
+launches. Explicit profile requests must isolate or fail. Selection is supplied explicitly by the host. Do not add installation-marker
+selection, compatibility shims or migration fallbacks.
 
 Core code must not depend on community-mod feature globals, Config, logging
 singletons or bootstrap entry points. Keep adapters explicit. One bootstrap and

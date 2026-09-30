@@ -3,7 +3,7 @@
 #if _WIN32
 
 #include "stfc_profiles/windows/prefs_store.h"
-#include "stfc_profiles/legacy_contract.h"
+#include "stfc_profiles/identity.h"
 
 #include <wincrypt.h>
 
@@ -203,7 +203,7 @@ ProfilePrefsStore::ProfilePrefsStore(const std::filesystem::path& local_app_data
     narrow_id.push_back(static_cast<char>(ch));
     profile_id_.push_back(static_cast<char16_t>(ch));
   }
-  if (!stfc::profiles::legacy::ValidId(narrow_id))
+  if (!stfc::profiles::ValidId(narrow_id))
     InvalidStore();
 
   const auto directory = local_app_data / L"STFC Community Mod" / L"Profiles" / std::wstring(profile_id);

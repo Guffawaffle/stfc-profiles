@@ -41,7 +41,7 @@ try {
     if ($CommunityModRoot) { $configure += "--community_mod_root=$CommunityModRoot" }
     Invoke-RecordedXMake -Arguments $configure
     Invoke-RecordedXMake -Arguments @('build', '-y')
-    Invoke-RecordedXMake -Arguments @('run', 'legacy-contract-tests')
+    Invoke-RecordedXMake -Arguments @('run', 'identity-tests')
     Invoke-RecordedXMake -Arguments @('run', 'prefs-store-tests')
     Invoke-RecordedXMake -Arguments @('run', 'consumer-smoke')
     if ($CommunityModRoot) {
