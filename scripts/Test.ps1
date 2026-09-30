@@ -1,11 +1,12 @@
 param(
     [string]$CommunityModRoot = '',
     [ValidateSet('windows','macosx')][string]$Platform = $(if ($IsWindows) { 'windows' } else { 'macosx' }),
-    [ValidateSet('x64','arm64')][string]$Architecture = $(if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' })
+    [ValidateSet('x64','x86_64','arm64')][string]$Architecture = $(if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } elseif ($IsWindows) { 'x64' } else { 'x86_64' })
 )
 
 $ErrorActionPreference = 'Stop'
 if ($IsWindows -and -not $env:WINDIR) { $env:WINDIR = $env:SystemRoot }
+if ($Platform -eq 'macosx' -and $Architecture -eq 'x64') { $Architecture = 'x86_64' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $previousLocation = Get-Location
 $records = [System.Collections.Generic.List[object]]::new()

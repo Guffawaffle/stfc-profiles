@@ -15,6 +15,7 @@ stfc-profiles rename --profile <id> "Engineering"
 stfc-profiles edit --profile <id> --game <directory>
 stfc-profiles launch --profile <id> [--game <directory>]
 stfc-profiles sessions
+stfc-profiles location
 stfc-profiles archive --profile <id>
 stfc-profiles restore --profile <id>
 stfc-profiles delete --profile <id> --archived --permanent
@@ -37,6 +38,12 @@ Native Windows shortcuts point to the CLI with the immutable ID. Names can
 change without invalidating the shortcut. Publication stages and flushes the
 link before a non-overwriting final move. Native Mac shortcut authoring remains
 unqualified and reports an explicit unavailable operation.
+
+`location` reports the neutral OS-user catalog root without reading or changing
+profile metadata. It does not accept `--root`. Windows uses the known-folder API
+with package redirection disabled so the CLI, game and packaged consumers can
+select the same directory. Packaged consumers must separately establish that
+filesystem virtualization does not redirect writes or lock files.
 
 Game commands use the same installation operations as Bridge. An explicit
 `--game` overrides a saved preferred installation. `--profile` only resolves that

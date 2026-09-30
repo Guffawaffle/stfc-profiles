@@ -161,6 +161,23 @@ void RecoveryValidatesBeforeReplacing()
   Throws([&]{ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);},"invalid backup restored");
   Check(fs::exists(backup) && !fs::exists(f.File(id)),"failed backup validation altered evidence");
 }
+void RootAliasesPreserveLeaseIdentity()
+{
+  Fixture f;const auto id=f.Create("Synthetic Root Alias");
+  auto spelling=f.root;
+#if _WIN32
+  auto native=spelling.native();
+  for (auto& ch:native) if (ch>=L'a' && ch<=L'z') ch-=L'a'-L'A';
+  spelling=fs::path(native);
+#endif
+  SessionLease lease(f.root,id);ProfilePrefsStore store(spelling,id,ProfileOpenMode::New,lease);
+  store.SetInt(u"alias-bound",27);
+  Check(fs::is_regular_file(lease.Directory()/"player_prefs.bin"),"alias store did not use held directory authority");
+  Fixture other;
+  Throws([&]{ProfilePrefsStore wrong(other.root,id,ProfileOpenMode::New,lease);},"different physical root admitted through an existing lease");
+  auto truncated=spelling.native();truncated.push_back(fs::path::value_type{});truncated+=fs::path("different").native();
+  Throws([&]{ProfilePrefsStore wrong(fs::path(truncated),id,ProfileOpenMode::New,lease);},"NUL root spelling admitted through a truncated alias");
+}
 void InterruptedFirstUsePreservesCommittedValues()
 {
   Fixture f;const auto id=f.Create("Synthetic Interrupted");
@@ -177,7 +194,7 @@ int main()
 {
   try {
     PersistenceAndEncryption();MissingEstablishedDataNeverReinitializes();WrongIdentityAndLeaseRefused();
-    StableLeaseExcludesWritersAndMoves();RecoveryValidatesBeforeReplacing();InterruptedFirstUsePreservesCommittedValues();
+    StableLeaseExcludesWritersAndMoves();RecoveryValidatesBeforeReplacing();RootAliasesPreserveLeaseIdentity();InterruptedFirstUsePreservesCommittedValues();
     std::cout<<"profile preference store tests passed\n";return 0;
   } catch (const std::exception& error) { std::cerr<<"profile preference tests failed: "<<error.what()<<'\n';return 1; }
 }

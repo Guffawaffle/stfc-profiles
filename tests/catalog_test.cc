@@ -15,6 +15,7 @@
 #include <vector>
 #if _WIN32
 #include <Windows.h>
+#include <shlobj.h>
 #else
 #include <cstdlib>
 #include <mach-o/dyld.h>
@@ -72,6 +73,22 @@ struct Fixture {
                  {"permanent",std::string_view(operation)=="delete"},{"expectedRevision",Find(id,archived).at("revision")}});
   }
 };
+void CatalogLocationIsReadOnly()
+{
+  const auto response=Json::parse(ExecuteCatalogRequest(Json{{"apiVersion",1},{"operation","catalog-location"}}.dump()));
+  Check(response.value("ok",false),response.dump());
+  const auto root=fs::u8path(response.at("catalogRoot").get<std::string>());
+  Check(root==DefaultCatalogRoot(),"catalog location disagrees with the host root");
+#if _WIN32
+  PWSTR value=nullptr;
+  Check(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_NO_PACKAGE_REDIRECTION,nullptr,&value)),"OS-user data path unavailable");
+  const auto expected=fs::path(value)/"STFC Profiles";CoTaskMemFree(value);
+  Check(root==expected,"profile root is redirected into a private package catalog");
+#endif
+  Fixture f;
+  const auto rejected=f.Call({{"operation","catalog-location"}});
+  Check(!rejected.value("ok",false)&&fs::is_empty(f.root),"read-only location request published catalog state");
+}
 void IdentityRevisionAndConflict()
 {
   Fixture f;const auto first=f.Create("Science");const auto id=first.at("id").get<std::string>();
@@ -233,7 +250,7 @@ int main(int argc,char** argv)
 {
   try {
     if (argc==4 && std::string_view(argv[1])=="--hold-lease") return HoldLease(fs::u8path(argv[2]),argv[3]);
-    IdentityRevisionAndConflict();IncompleteEntriesAreVisibleFailures();LifecycleRequiresBothWriterAndBrowserInactivity();CrossProcessExclusionAndIdentity();
+    CatalogLocationIsReadOnly();IdentityRevisionAndConflict();IncompleteEntriesAreVisibleFailures();LifecycleRequiresBothWriterAndBrowserInactivity();CrossProcessExclusionAndIdentity();
     std::cout<<"profile catalog tests passed\n";return 0;
   } catch (const std::exception& error) { std::cerr<<"profile catalog tests failed: "<<error.what()<<'\n';return 1; }
 }

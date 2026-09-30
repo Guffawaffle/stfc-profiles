@@ -80,6 +80,7 @@ void Help()
            <<"stfc-profiles edit --profile ID [--game PATH]\n"
            <<"stfc-profiles launch --profile ID [--game PATH]\n"
            <<"stfc-profiles sessions\n"
+           <<"stfc-profiles location\n"
            <<"stfc-profiles archive --profile ID\n"
            <<"stfc-profiles restore --profile ID\n"
            <<"stfc-profiles delete --profile ID --archived --permanent\n"
@@ -206,6 +207,7 @@ int Run(const std::vector<std::string>& input)
 #if ! _WIN32
     if (args.operation=="--internal-browser") return InternalBrowser(args);
 #endif
+    if (args.operation=="location") args.operation="catalog-location";
     bool installation=false;
     if (args.operation=="game") {
       if (args.positional.size()!=1) throw std::runtime_error("game requires status, check, update, or recover");
@@ -230,9 +232,11 @@ int Run(const std::vector<std::string>& input)
     }
     if (!installation && args.operation!="list" && args.operation!="create" && args.operation!="rename" && args.operation!="edit"
         && args.operation!="archive" && args.operation!="restore" && args.operation!="delete"
-        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut")
+        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut" && args.operation!="catalog-location")
       throw std::runtime_error("unknown command: "+args.operation);
-    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions"))
+    if (args.operation=="catalog-location" && args.values.contains("--root"))
+      throw std::runtime_error("location reports the OS-user root; omit --root");
+    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions" || args.operation=="catalog-location"))
       throw std::runtime_error("--profile is not accepted for this command");
     if (args.values.contains("--output") && args.operation!="shortcut")
       throw std::runtime_error("--output applies only to shortcut");
@@ -263,7 +267,7 @@ int Run(const std::vector<std::string>& input)
       if (args.positional.size()!=1) throw std::runtime_error("provide one display name; quote names containing spaces");
       request["name"]=args.positional.front();
     } else if (!args.positional.empty()) throw std::runtime_error("unexpected positional argument");
-    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions")
+    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions" && args.operation!="catalog-location")
       request["id"]=Required(args,"--profile");
     if (args.operation=="delete") {
       if (!args.permanent || !args.archived) throw std::runtime_error("permanent deletion requires --archived --permanent");

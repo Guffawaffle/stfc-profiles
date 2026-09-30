@@ -113,10 +113,13 @@ ProfilePrefsStore::ProfilePrefsStore(const std::filesystem::path& root, std::str
                                      ProfileOpenMode mode, SessionLease& lease)
   : lease_(&lease), id_(id)
 {
+  std::error_code root_error;
+  const bool root_matches = lease.Owns()
+      && root.native().find(std::filesystem::path::value_type{}) == root.native().npos
+      && std::filesystem::equivalent(root, lease.Root(), root_error) && !root_error;
   if ((mode != ProfileOpenMode::New && mode != ProfileOpenMode::Resume && mode != ProfileOpenMode::Existing)
       || !ValidId(id) || !lease.Owns() || lease.Id() != id
-      || std::filesystem::absolute(root).lexically_normal()
-           != std::filesystem::absolute(lease.Root()).lexically_normal())
+      || !root_matches)
     throw std::runtime_error("preference store requires the matching live profile lease");
   if (lease.PreferencesInitialized() && mode != ProfileOpenMode::Existing)
     throw std::runtime_error("established profile requires Existing preference mode");
@@ -330,7 +333,7 @@ void ProfilePrefsStore::DeleteKey(std::u16string_view key)
     return;
   }
   auto next = values_;
-  next.erase(key);
+  next.erase(next.find(key));
   Persist(next);
   values_.swap(next);
 }

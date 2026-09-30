@@ -548,7 +548,7 @@ fs::path DefaultCatalogRoot()
 {
 #if _WIN32
   PWSTR value = nullptr;
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &value)))
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_NO_PACKAGE_REDIRECTION, nullptr, &value)))
     Fail("root_unavailable", "The operating system could not locate this user's profile data directory.");
   fs::path root(value); CoTaskMemFree(value); return root / "STFC Profiles";
 #else
@@ -676,6 +676,10 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     if (!request.is_object() || request.value("apiVersion", 0) != 1)
       Fail("api_version", "The catalog request requires apiVersion 1.");
     const auto operation = request.at("operation").get<std::string>();
+    if (operation == "catalog-location") {
+      if (request.contains("root")) Fail("invalid_request", "Catalog location reports the OS-user root; omit root.");
+      return Json{{"apiVersion", 1}, {"ok", true}, {"catalogRoot", Utf8(DefaultCatalogRoot())}}.dump();
+    }
     if (operation == "installation-status" || operation == "check-game-update"
         || operation == "update-game" || operation == "recover-game-update")
       return ExecuteInstallationRequest(request_utf8);

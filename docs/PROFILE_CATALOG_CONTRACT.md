@@ -94,6 +94,12 @@ preferences report explicit failures. They never silently recreate an empty
 account, select another ID or use a second catalog as fallback. Filesystem and
 crash behavior must be verified on supported platforms during implementation.
 
+Windows resolves this shared root through the OS known-folder API with package
+redirection disabled. A packaged consumer must also exclude the shared directory
+from filesystem virtualization; a matching displayed path alone does not prove
+cross-process storage or lock visibility. `stfc-profiles location` reports the
+OS-user root without creating or opening catalog state.
+
 ## Launch and CLI direction
 
 Installing capability does not activate a named profile. Ordinary `prime.exe`
