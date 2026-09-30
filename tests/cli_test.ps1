@@ -11,9 +11,27 @@ New-Item -ItemType Directory -Path $fixtureAbsolute | Out-Null
 function Invoke-ProfileCli {
     param([string[]]$CliArguments, [bool]$ExpectedSuccess=$true)
     $fullArguments = @('--root', $fixtureAbsolute, '--json') + $CliArguments
-    $resultText = & $profileCli @fullArguments
-    $resultCode = $LASTEXITCODE
-    $result = ($resultText -join "`n") | ConvertFrom-Json
+    # JSON is UTF-8 even when a hidden desktop PowerShell has an ANSI console
+    # decoder. Do not change the caller's shared console code page for a test.
+    $start = [Diagnostics.ProcessStartInfo]::new($profileCli)
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+    $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false, $true)
+    foreach ($argument in $fullArguments) { $start.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Could not start the CLI fixture process.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $resultText = $stdout.GetAwaiter().GetResult()
+        $errorText = $stderr.GetAwaiter().GetResult()
+        $resultCode = $process.ExitCode
+    } finally { $process.Dispose() }
+    $result = $resultText | ConvertFrom-Json
     if ($ExpectedSuccess -and ($resultCode -ne 0 -or -not $result.ok)) {
         throw "CLI command failed: $($CliArguments -join ' '): $($resultText -join ' ')"
     }
