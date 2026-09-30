@@ -8,15 +8,7 @@ namespace stfc::profiles {
 
 inline bool ValidId(std::string_view id)
 {
-  if (id.empty() || id.size() > 32)
-    return false;
-  for (const char ch : id)
-    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'))
-      return false;
-  if (id == "con" || id == "prn" || id == "aux" || id == "nul")
-    return false;
-  return !(id.size() == 4 && id[3] >= '1' && id[3] <= '9'
-           && (id.substr(0, 3) == "com" || id.substr(0, 3) == "lpt"));
+  return id.size() == 32 && id.find_first_not_of("0123456789abcdef") == id.npos;
 }
 
 } // namespace stfc::profiles

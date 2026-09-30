@@ -1,0 +1,20 @@
+LIBRARY "version"
+EXPORTS
+VerFindFileA
+VerFindFileW
+VerInstallFileA
+VerInstallFileW
+GetFileVersionInfoSizeA
+GetFileVersionInfoSizeW
+GetFileVersionInfoA
+GetFileVersionInfoW
+GetFileVersionInfoSizeExA
+GetFileVersionInfoSizeExW
+GetFileVersionInfoExA
+GetFileVersionInfoExW
+VerLanguageNameA
+VerLanguageNameW
+VerQueryValueA
+VerQueryValueW
+STFCProfilesExplicitLaunchContractV1 DATA
+STFCProfilesBrowserLaunchW

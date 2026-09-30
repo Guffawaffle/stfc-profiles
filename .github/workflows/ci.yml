@@ -1,0 +1,50 @@
+name: Native Profiles verification
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: windows
+            architecture: x64
+          - runner: macos-15-intel
+            platform: macosx
+            architecture: x64
+          - runner: macos-15
+            platform: macosx
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a # v1
+        with:
+          xmake-version: '3.0.8'
+      - name: Create CI-only Keychain fixture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos_keychain_fixture.sh setup
+      - name: Build and verify synthetic state
+        shell: pwsh
+        run: ./scripts/Test.ps1 -Platform '${{ matrix.platform }}' -Architecture '${{ matrix.architecture }}'
+      - name: Restore CI Keychain state
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: bash tests/macos_keychain_fixture.sh cleanup
+      - name: Retain verification receipt
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: verification-${{ matrix.platform }}-${{ matrix.architecture }}
+          path: artifacts/verification.json
+          if-no-files-found: error

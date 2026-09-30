@@ -26,8 +26,8 @@ canonical game executable; a preferred installation may be overridden explicitly
 Windows root: `%LOCALAPPDATA%\STFC Profiles`.
 macOS root: `~/Library/Application Support/STFC Profiles/`.
 These are OS-user data locations, independent of the game installation and of
-which distribution supplies the runtime. macOS protection and loading still
-require implementation and qualification.
+which distribution supplies the runtime. macOS protection has native source;
+compilation, consent and game loading still require qualification.
 
 ```text
 STFC Profiles/
@@ -53,7 +53,9 @@ Each profile has versioned, plaintext `metadata.json` containing its editable
 display name and optional preferred game installation. The directory name is
 the ID authority. Login tokens and account preferences remain outside metadata
 in the protected preference store. Profile-specific logs and other owned data
-travel with the directory; exact configuration integration remains open.
+travel with the directory. Named sessions and Bridge Settings use profile-owned
+`config.toml`, `runtime.toml` and logs; configuration data leases block directory
+moves while reading or saving.
 
 Windows preference encryption remains bound to the OS user through DPAPI.
 Preserving an ID keeps identity intact; it does not make encrypted account data
@@ -99,14 +101,18 @@ and official-launcher launches retain ordinary OS-user preferences. GUI selectio
 and other profile activity never redirect a bare launch. An explicit profile
 request must isolate the exact requested ID or stop with guidance.
 
-On Windows the game-host request is `prime.exe -stfc-profile <id>` using separate
-argument tokens. Store lifecycle modes `New`, `Resume` and `Existing` remain
+On Windows the game-host profile selector is `prime.exe -stfc-profile <id>` using
+separate argument tokens. The coordinator supplies Unity's `-logFile` argument
+with that profile's `logs/Player.log` path before game startup. CLI launches,
+native shortcuts and Bridge use this coordinator. A manual direct game command
+must also supply `-logFile <profile-directory>/logs/Player.log` to isolate Unity
+logs; the selector alone routes account preferences. Store lifecycle modes
+`New`, `Resume` and `Existing` remain
 explicit host inputs; the host must not silently create a replacement for a
 missing established store. Profile selection must occur before login state is
 read. Isolation readiness and a correct logged-in account are separate observations.
 
-The executable name and initial CLI forms are agreed direction, not commands
-implemented in the current source:
+The initial CLI forms are implemented in local development source:
 
 ```text
 stfc-profiles list
@@ -116,11 +122,26 @@ stfc-profiles launch --profile <id> --game <path>
 stfc-profiles sessions
 ```
 
-Archive, restore and permanent deletion will use the same catalog operations;
-their detailed CLI syntax remains implementation work. Shortcuts invoke the
+Archive, restore and explicit permanent deletion use the same catalog operations.
+Shortcuts invoke the
 coordinator with an immutable ID and explicit or saved installation selection.
 Renaming a profile does not invalidate its shortcut. Native macOS launch input
 and protection follow the same identity/lifecycle contract and need qualification.
+
+## Installation updates in the MVP
+
+On 2026-09-29 Guff added installation selection and game updating to the Profiles
+MVP. Direct download and application is the preferred implementation; a managed
+official-updater handoff is authorized if the direct route cannot be qualified.
+The player should choose the intended installation in Profiles, rather than
+manually change the official launcher's settings as a prerequisite to testing.
+
+The shared component owns these operations for both the standalone CLI and
+Bridge. An update targets an installation, not an account: update the shared
+game files once while every session using that installation is stopped. Profile
+identity, account data and archive state remain separate. See the accepted
+[game installation contract](GAME_INSTALLATION_CONTRACT.md) for locking, staging,
+verification, recovery and the initial full-image implementation boundary.
 
 ## Distribution and supersession
 
@@ -143,21 +164,22 @@ evidence of their exact checkpoints. They are not current design instructions.
 
 ## Current implementation and return point
 
-The shared source currently implements ID validation, Windows DPAPI preference
-storage and the explicit-input game adapter. Its Windows store still uses
-`STFC Community Mod\Profiles` and a writer lock inside the profile directory.
-Bridge currently persists its private `launch-profiles.json`, passes the profile
-argument, and derives configuration/log paths using the earlier layout. These
-are implementation gaps against this contract, not alternate supported designs.
+Local source implements the shared native catalog and versioned API, metadata
+mutations, archive/restore and independent writer/data/installation locks. The CLI,
+Windows shortcuts and standalone bootstrap build, and native catalog/preference
+tests pass on synthetic data. Bridge consumes the native component and preserves
+its selected ID as private UI state. Named configuration/log paths use the shared
+profile directory; the earlier storage root/private account index are removed.
 
-The shared catalog, metadata operations, archive/restore coordination, CLI and
-shortcuts are not implemented. Active mod host integration, standalone bootstrap,
-readiness/admission, macOS protected storage/loading and live shared-install
-qualification remain open. SDK and Go validation repairs do not qualify these.
+Mod and standalone host source share the adapter. The runtime commits monotonic
+preference-initialization metadata before publishing readiness; missing established
+data cannot become a fresh empty account. Native game-update operations and
+Bridge presentation are implemented locally, with synthetic integrity/recovery
+fixtures. No new signed implementation checkpoint or player release is claimed
+by this in-progress documentation. Final pins, package/review checks, macOS native
+compilation/loading, and live dev update/account qualification remain open.
 
-Implementation starts with the shared catalog and lifecycle operations, then
-the CLI and Bridge consumption of them, then both runtime hosts and platform
-adapters. Qualify ordinary launch, two distinct accounts from one executable,
+Qualify ordinary launch, two distinct accounts from one executable,
 reverse restart persistence, duplicate-profile refusal, sign-in callbacks and
 stopped-session archive/restore before claiming player support. See
 [integration](INTEGRATION.md), [roadmap](ROADMAP.md) and the

@@ -6,9 +6,9 @@
 
 int main()
 {
-  if (stfc::profiles::ComponentVersion() != "0.2.0-dev"
+  if (stfc::profiles::ComponentVersion() != "0.3.0-dev"
       || stfc::profiles::ExtractionSourceRevision().size() != 40
-      || !stfc::profiles::ValidId("consumer_1"))
+      || !stfc::profiles::ValidId("0123456789abcdef0123456789abcdef"))
     throw std::runtime_error("public source-library interface mismatch");
   std::cout << "public consumer linked " << stfc::profiles::ComponentVersion() << '\n';
 }
