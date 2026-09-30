@@ -99,6 +99,50 @@ void Plain(const fs::path& path, bool directory)
     Fail("invalid_path", "Profile storage must not use a reparse point: " + Utf8(path));
 #endif
 }
+#if _WIN32
+fs::path WindowsPathName(const fs::path& path)
+{
+  auto name = path.lexically_normal().make_preferred().native();
+  if (name.starts_with(L"\\\\?\\UNC\\")) name = L"\\\\" + name.substr(8);
+  else if (name.starts_with(L"\\\\?\\")) name.erase(0, 4);
+  auto normalized = fs::path(name).lexically_normal().make_preferred();
+  if (normalized.has_relative_path() && normalized.filename().empty())
+    normalized = normalized.parent_path();
+  return normalized;
+}
+#endif
+void CheckSharedRoot(const fs::path& physical)
+{
+#if _WIN32
+  const auto expected = WindowsPathName(DefaultCatalogRoot());
+  const auto actual = WindowsPathName(physical);
+  if (CompareStringOrdinal(actual.c_str(), -1, expected.c_str(), -1, TRUE) != CSTR_EQUAL)
+    Fail("root_redirected", "Windows redirected the shared Profiles folder into private app storage. Open Profiles from a desktop shortcut or an ordinary terminal.");
+#endif
+}
+#if _WIN32
+void CheckSharedLockHandle(const fs::path& requested, HANDLE handle)
+{
+  const auto expected = WindowsPathName(requested);
+  const auto shared = WindowsPathName(DefaultCatalogRoot());
+  const auto& name = expected.native();
+  const auto& prefix = shared.native();
+  if (name.size() <= prefix.size() || name[prefix.size()] != L'\\'
+      || CompareStringOrdinal(name.c_str(), static_cast<int>(prefix.size()),
+                              prefix.c_str(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL)
+    return;
+  std::vector<wchar_t> buffer(32768);
+  const auto length = GetFinalPathNameByHandleW(handle, buffer.data(),
+      static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!length || length >= buffer.size())
+    Fail("lock_failed", "Could not establish the physical shared lifecycle-lock path.");
+  std::wstring physical(buffer.data(), length);
+  if (physical.starts_with(L"\\\\?\\UNC\\")) physical = L"\\\\" + physical.substr(8);
+  else if (physical.starts_with(L"\\\\?\\")) physical.erase(0, 4);
+  if (CompareStringOrdinal(physical.c_str(), -1, name.c_str(), -1, TRUE) != CSTR_EQUAL)
+    Fail("root_redirected", "Windows redirected the shared Profiles lifecycle lock into private app storage. Open Profiles from a desktop shortcut or an ordinary terminal.");
+}
+#endif
 fs::path CatalogRoot(const fs::path& requested)
 {
   if (requested.native().find(fs::path::value_type{}) != requested.native().npos)
@@ -107,6 +151,14 @@ fs::path CatalogRoot(const fs::path& requested)
   fs::create_directories(requested);
   Plain(requested, true);
   const auto root = fs::canonical(requested);
+#if _WIN32
+  const auto normalized = WindowsPathName(requested);
+  const auto shared = WindowsPathName(DefaultCatalogRoot());
+  std::error_code identity_error;
+  if (CompareStringOrdinal(normalized.c_str(), -1, shared.c_str(), -1, TRUE) == CSTR_EQUAL
+      || (fs::equivalent(requested, shared, identity_error) && !identity_error))
+    CheckSharedRoot(root);
+#endif
   for (const auto* name : {"profiles", "archives", ".locks", "sessions"}) {
     fs::create_directories(root / name);
     Plain(root / name, true);
@@ -189,6 +241,8 @@ public:
             || information.nNumberOfLinks != 1) {
           Release(); Fail("invalid_path", "Lifecycle locks must be ordinary, singly linked files.");
         }
+        try { CheckSharedLockHandle(path, handle_); }
+        catch (...) { Release(); throw; }
         return;
       }
       const auto error = GetLastError();
@@ -586,11 +640,17 @@ InstallationLease::InstallationLease(const fs::path& requested, const fs::path& 
   impl_->key = Hash(key_input);
   // Installation identity is independent of a caller's profile catalog root.
   // Only lifecycle files are touched here; no other catalog is discovered.
-  const auto lock_root = DefaultCatalogRoot() / ".locks";
+  const auto shared_root = DefaultCatalogRoot();
+  fs::create_directories(shared_root);
+  Plain(shared_root, true);
+  CheckSharedRoot(fs::canonical(shared_root));
+  const auto lock_root = shared_root / ".locks";
   fs::create_directories(lock_root);
   Plain(lock_root.parent_path(), true);
   Plain(lock_root, true);
-  impl_->access = Lock(fs::canonical(lock_root) / ("install-" + impl_->key + ".lock"), !exclusive);
+  // Preserve the expected neutral spelling until the actual acquired handle is
+  // checked. Canonicalizing a virtualized child directory could hide redirection.
+  impl_->access = Lock(lock_root / ("install-" + impl_->key + ".lock"), !exclusive);
 }
 InstallationLease::~InstallationLease() = default;
 InstallationLease::InstallationLease(InstallationLease&&) noexcept = default;

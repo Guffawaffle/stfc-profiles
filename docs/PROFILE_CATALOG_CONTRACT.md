@@ -99,6 +99,12 @@ redirection disabled. A packaged consumer must also exclude the shared directory
 from filesystem virtualization; a matching displayed path alone does not prove
 cross-process storage or lock visibility. `stfc-profiles location` reports the
 OS-user root without creating or opening catalog state.
+Catalog admission and the shared installation-lock directory compare their
+physical Windows directory with that OS-user root. Private app-storage
+redirection is an explicit `root_redirected` failure, even when the process has
+no package identity. It never creates a second active catalog as a fallback.
+Desktop shortcuts and ordinary terminals supply the usual desktop launch
+context; packaged hosts must qualify their filesystem declaration separately.
 
 ## Launch and CLI direction
 

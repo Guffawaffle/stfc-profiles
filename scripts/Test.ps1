@@ -72,6 +72,10 @@ try {
     if ($Platform -eq 'windows') { Invoke-RecordedCliTests }
     Invoke-RecordedXMake -Arguments @('build', '-y', 'stfc-profiles-community-mod-adapter')
     Invoke-RecordedXMake -Arguments @('build', '-y', 'stfc-profiles-runtime')
+    if ($Platform -eq 'windows') {
+        Invoke-RecordedXMake -Arguments @('build', '-y', 'runtime-loader-tests')
+        Invoke-RecordedXMake -Arguments @('run', 'runtime-loader-tests', (Join-Path $taskRoot "build/$Platform/$Architecture/release/version.dll"))
+    }
     Set-Location (Join-Path $taskRoot 'examples/consumer')
     Invoke-RecordedXMake -Arguments @('f', '-P', '.', '-c', '-p', $Platform, '-a', $Architecture, '-m', 'release', '-y')
     Invoke-RecordedXMake -Arguments @('build', '-P', '.', '-y')

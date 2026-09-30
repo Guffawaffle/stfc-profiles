@@ -29,13 +29,14 @@ namespace {
 std::string requested_id;
 std::unique_ptr<stfc::profiles::SessionLease> session;
 std::unique_ptr<stfc::profiles::InstallationLease> installation;
-[[noreturn]] void Stop(const char* reason)
+[[noreturn]] void Stop(const char* reason) noexcept
 {
   if (session) { try { session->MarkFailed(reason); } catch (...) {} }
   std::fprintf(stderr,"STFC Profiles: %s\nUse stfc-profiles list and launch --profile <id>.\n",reason);
 #if _WIN32
-  const auto guidance=std::string(reason)+"\n\nUse stfc-profiles list, then stfc-profiles launch --profile <id>.";
-  MessageBoxA(nullptr,guidance.c_str(),"STFC Profiles: launch stopped",MB_OK|MB_ICONERROR);
+  char guidance[2048]{};
+  std::snprintf(guidance,sizeof(guidance),"%s\n\nUse stfc-profiles list, then stfc-profiles launch --profile <id>.",reason);
+  MessageBoxA(nullptr,guidance,"STFC Profiles: launch stopped",MB_OK|MB_ICONERROR);
   ExitProcess(190);
 #else
   _exit(190);
@@ -131,17 +132,27 @@ void Initialize()
 }
 } // namespace
 #if _WIN32
-BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID)
+namespace {
+// Keep all process-only work out of the thread-notification frame. The static
+// CRT requires thread notifications and graphics threads may have small stacks.
+__declspec(noinline) BOOL ProcessAttach()
 {
-  if (reason!=DLL_PROCESS_ATTACH) return TRUE;
-  DisableThreadLibraryCalls(instance);
-  wchar_t executable[32768]{};
-  const auto length=GetModuleFileNameW(nullptr,executable,32768);
-  if (!length || length==32768) Stop("could not identify the game executable");
-  const auto name=std::filesystem::path(executable).filename().wstring();
-  if (CompareStringOrdinal(name.c_str(),-1,L"prime.exe",-1,TRUE)!=CSTR_EQUAL) return TRUE;
-  VersionDllInit();
-  Initialize();
+  try {
+    std::vector<wchar_t> executable(32768);
+    const auto length=GetModuleFileNameW(nullptr,executable.data(),static_cast<DWORD>(executable.size()));
+    if (!length || length==executable.size()) Stop("could not identify the game executable");
+    const auto name=std::filesystem::path(std::wstring(executable.data(),length)).filename().wstring();
+    if (CompareStringOrdinal(name.c_str(),-1,L"prime.exe",-1,TRUE)!=CSTR_EQUAL) return TRUE;
+    VersionDllInit();
+    Initialize();
+    return TRUE;
+  } catch (const std::exception& error) { Stop(error.what()); }
+  catch (...) { Stop("could not initialize the game bootstrap"); }
+}
+} // namespace
+BOOL WINAPI DllMain(HINSTANCE,DWORD reason,LPVOID)
+{
+  if (reason==DLL_PROCESS_ATTACH) return ProcessAttach();
   return TRUE;
 }
 #else

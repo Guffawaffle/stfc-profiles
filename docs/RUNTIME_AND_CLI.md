@@ -44,6 +44,10 @@ profile metadata. It does not accept `--root`. Windows uses the known-folder API
 with package redirection disabled so the CLI, game and packaged consumers can
 select the same directory. Packaged consumers must separately establish that
 filesystem virtualization does not redirect writes or lock files.
+Admission rejects a physically redirected default root with `root_redirected`;
+launch from a desktop shortcut or ordinary terminal to use the shared catalog.
+The shared installation lock applies the same physical-root check even when a
+consumer supplies a separate synthetic catalog root for tests.
 
 Game commands use the same installation operations as Bridge. An explicit
 `--game` overrides a saved preferred installation. `--profile` only resolves that

@@ -14,7 +14,7 @@ struct Fixture {
   Fixture(){
     wchar_t directory[MAX_PATH+1]{},file[MAX_PATH+1]{};
     Check(GetTempPathW(MAX_PATH+1,directory)>0,"No temporary root");Check(GetTempFileNameW(directory,L"spi",0,file)!=0,"No temporary fixture path");
-    root=file;fs::remove(root);fs::create_directory(root);game=root/"game";catalog=root/"catalog";fs::create_directories(game/"prime_Data");
+    root=file;fs::remove(root);fs::create_directory(root);root=fs::canonical(root);game=root/"game";catalog=root/"catalog";fs::create_directories(game/"prime_Data");
     Durable(game/"prime.exe","old executable");Durable(game/"GameAssembly.dll","old assembly");Durable(game/"UnityPlayer.dll","old unity");
     Durable(game/"prime_Data"/"existing.txt","old asset");Durable(game/"version.dll","community mod extra");Durable(game/"config.toml","user config extra");Durable(game/".version","&game=221");
     transaction=Transaction(game,Key(game));ownership=Ownership(game,Key(game));
@@ -179,6 +179,9 @@ void OwnershipAndApi(){
     Durable(f.ownership,old.dump());auto journal=f.Stage();Commit(f.game,f.transaction,f.ownership,journal);
     Check(!fs::exists(f.game/"obsolete.txt"),"Unchanged obsolete owned file retained");Check(Read(f.game/"modified-owned.txt",100)=="user changed old official file","Modified old owned file was removed");f.Extras();
     auto status=f.Call("installation-status");Check(status.value("ok",false),status.dump().c_str());Check(status["installation"]["phase"]=="committed","Committed status not reported");
+    const auto alias=f.game.parent_path()/"."/f.game.filename();
+    auto aliasStatus=Json::parse(ExecuteInstallationRequest(Json{{"apiVersion",1},{"operation","installation-status"},{"root",Utf8(f.catalog)},{"gameDirectory",Utf8(alias)}}.dump()));
+    Check(aliasStatus.value("ok",false)&&aliasStatus["installation"]==status["installation"],"Caller alias split the canonical installation transaction");
     auto recovery=f.Call("recover-game-update");Check(recovery.value("ok",false),recovery.dump().c_str());Check(!fs::exists(f.transaction),"Committed history still blocks future installation activity");}
   {Fixture f;auto journal=f.Stage();auto status=f.Call("installation-status");Check(status.value("ok",false),status.dump().c_str());Check(status["installation"]["requiresRecovery"]==true,"Stale staged transaction not blocking");
     auto recovery=f.Call("recover-game-update");Check(recovery.value("ok",false),recovery.dump().c_str());f.Original();Check(!fs::exists(f.transaction),"Recovered transaction still blocks installation");

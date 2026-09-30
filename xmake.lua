@@ -68,3 +68,13 @@ target("stfc-profiles-runtime")
         add_syslinks("shell32", "ole32", "advapi32", "uuid", "user32")
     end
 target_end()
+
+if is_plat("windows") then
+    target("runtime-loader-tests")
+        set_kind("binary")
+        set_default(false)
+        add_deps("stfc-profiles-runtime", {inherit = false})
+        add_files("tests/runtime_loader_test.cc")
+        set_exceptions("cxx")
+    target_end()
+end
