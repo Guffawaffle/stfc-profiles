@@ -10,7 +10,11 @@ launch runtime are still being implemented.
   DPAPI preference storage, with per-profile writer exclusion.
 - Community-mod adapter: takes a profile ID and store mode explicitly from its
   host, then installs preference and browser hooks through IL2CPP/SPUD.
-- Bridge: owns its JSON profile registry and supplies the requested ID at launch.
+- Shared profile catalog and CLI: owned by this repository; the accepted directory
+  layout, metadata and archive lifecycle are recorded in the
+  [canonical contract](docs/PROFILE_CATALOG_CONTRACT.md). Implementation is open.
+- Bridge: consumes the shared catalog operations and supplies the requested ID
+  at launch; its existing private JSON tracking remains an implementation gap.
 
 The profile-only tool and community mod are mutually exclusive distributions in
 one game installation. Both will compile the same pinned library into their

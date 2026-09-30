@@ -14,6 +14,17 @@ requirements. Consumers choose compatible compiler/runtime settings. The separat
 `examples/consumer` project uses C++23 and the Windows static C runtime; invoke
 XMake with `-P .` in that directory to select its own project.
 
+## Shared catalog ownership
+
+The [canonical catalog and launch contract](PROFILE_CATALOG_CONTRACT.md) owns
+per-user paths, immutable IDs, metadata, archive/restore and CLI direction.
+Bridge and the CLI use the shared catalog operations; consumers must not create
+independent authoritative indexes or derive account identity from installation
+paths or display names. Launch and archive/restore share lifecycle exclusion
+whose identity survives directory moves. These operations and the neutral
+storage layout remain implementation work; the host interface below describes
+the existing extracted adapter.
+
 ## Host interface
 
 Compile `adapters/community_mod/profile_isolation.cc` exactly once, link the core

@@ -1,7 +1,12 @@
 # STFC Profiles working agreement
 
 This repository owns the shared STFC profile library, platform adapters,
-profile-only product and their contracts. The community mod consumes a pinned
+profile-only product and their contracts. The accepted catalog, archive lifecycle
+and CLI direction are defined in [docs/PROFILE_CATALOG_CONTRACT.md](docs/PROFILE_CATALOG_CONTRACT.md).
+This repository owns the shared directory catalog; Bridge and the CLI consume
+the same operations. Do not restore Bridge-only catalog ownership or a central
+profile index. Keep accepted target behavior separate from implementation evidence.
+The community mod consumes a pinned
 source revision; Bridge consumes release and launch contracts. Use the existing
 checkout. Do not edit another repository or an installed game through this repo.
 
