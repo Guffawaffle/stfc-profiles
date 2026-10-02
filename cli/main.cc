@@ -83,6 +83,21 @@ std::wstring ImportWide(std::string_view text) {
   MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),output.data(),length);
   return output;
 }
+bool ConfirmUserDiscovery() {
+  TASKDIALOG_BUTTON buttons[]{{IDOK,L"&Continue"},{IDCANCEL,L"&Not now"}};
+  TASKDIALOGCONFIG dialog{sizeof(dialog)};
+  dialog.dwFlags=TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+  dialog.pszWindowTitle=L"STFC Profiles"; dialog.pszMainIcon=TD_INFORMATION_ICON;
+  dialog.pszMainInstruction=L"Find other Windows users with STFC data";
+  dialog.pszContent=L"We'll check which Windows users have saved STFC data. This step only lists users; it won't copy a login or create a profile.\n\nWindows needs permission to check protected user setups. Choose Continue to open the Windows permission prompt. If needed, Windows will ask for an administrator's username and password.";
+  dialog.cButtons=2; dialog.pButtons=buttons; dialog.nDefaultButton=IDCANCEL;
+  dialog.pszExpandedInformation=L"Only user names, identifiers and STFC data availability are returned. Saved logins are copied only after you select a user and review an import. Profiles does not ask for or store Windows passwords.";
+  dialog.pszExpandedControlText=L"Why is this needed?";
+  int selected=IDCANCEL;
+  if (FAILED(TaskDialogIndirect(&dialog,&selected,nullptr,nullptr)))
+    throw std::runtime_error("The discovery explanation could not open. No permission request was made.");
+  return selected==IDOK;
+}
 bool ConfirmImportElevation(const Json& plan) {
   const auto title=ImportWide("Import "+plan.at("sourceUserName").get<std::string>()+"'s STFC setup");
   const auto content=ImportWide("We'll copy the saved STFC login and game settings into "+plan.at("name").get<std::string>()
@@ -107,7 +122,7 @@ void Help()
 {
   std::cout<<"stfc-profiles list [--archived]\n"
            <<"stfc-profiles create NAME [--game PATH]\n"
-           <<"stfc-profiles users [--json]\n"
+           <<"stfc-profiles users [--json] [--approve-elevation]\n"
            <<"stfc-profiles import NAME --user SID [--game PATH] [--approve-elevation]\n"
            <<"  Imports saved login and game preferences by Windows user, preserving the source.\n"
            <<"  --approve-elevation shows the explanation, then opens native Windows approval if needed.\n"
@@ -251,7 +266,24 @@ int Run(const std::vector<std::string>& input)
       return 0;
     }
 #endif
-    if (args.operation=="users") args.operation="import-sources";
+    if (args.operation=="users") {
+      if (!args.positional.empty() || !args.values.empty() || args.archived || args.permanent)
+        throw std::runtime_error("users accepts --json and --approve-elevation");
+      Json query{{"operation","import-sources"}};
+      auto response=Call(query);
+      if (args.approve_elevation && response.value("ok",false) && response.value("requiresElevation",false)) {
+#if _WIN32
+        if (!ConfirmUserDiscovery()) response=Failure("import_cancelled", "User discovery was cancelled. No profile was created.");
+        else {
+          query["allowElevation"]=true;
+          query["expectedDestinationSid"]=response.at("destinationUser").at("sid");
+          response=Call(query);
+        }
+#endif
+      }
+      if (json_output) std::cout<<response.dump()<<'\n'; else std::cout<<response.dump(2)<<'\n';
+      return response.value("ok",false)?0:1;
+    }
     if (args.operation=="import") {
       if (args.positional.size()!=1 || args.archived || args.permanent
           || args.values.contains("--profile") || args.values.contains("--expected-revision")
@@ -292,7 +324,7 @@ int Run(const std::vector<std::string>& input)
       return response.value("ok",false)?0:1;
     }
     if (args.values.contains("--user") || args.approve_elevation)
-      throw std::runtime_error("--user and --approve-elevation apply only to import");
+      throw std::runtime_error("--user applies to import; --approve-elevation applies to import or users");
     if (args.operation=="location") args.operation="catalog-location";
     bool installation=false;
     if (args.operation=="game") {

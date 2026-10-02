@@ -148,8 +148,23 @@ import sources with separate destination profile IDs. Windows development source
 implements this operation in the shared owner. Live account portability and
 standard-user credential/UAC qualification remain distinct checks.
 
-`import-sources` enumerates Windows ProfileList users and reports the destination
-user. `prepare-user-import` validates the source SID, new display name and preferred
+`import-sources` returns only Windows users with a nonempty STFC preference key,
+plus the original destination user, `requiresElevation` and `unavailableUsers`.
+Readable matches remain available when another user's setup is protected or
+unavailable. Discovery resolves OS profile metadata without inspecting every
+private directory; source resolution checks only the selected SID. Key presence
+is checked without decoding login values. Offline discovery parses the selected
+key path in a read-only in-memory hive, never mounting or copying it.
+
+**Find other Windows users…** presents a friendly discovery explanation before
+permission is requested. Its `import-sources` request supplies `allowElevation`
+and the expected original destination SID. The short-lived helper checks STFC
+key availability and returns names/IDs/status only, with no credential values,
+profile creation or launch-selection change. Discovery approval does not retain
+an elevated launcher or authorize a later account copy. A protected selected
+source may require another native Windows approval after its import review.
+
+ `prepare-user-import` validates the source SID, new display name and preferred
 installation, then reports the actual read-access requirement. `import-user`
 requires the reviewed destination SID and explicit elevation consent. Neither
 planning nor discovery reads account values into the public JSON response.
@@ -173,7 +188,7 @@ string that would make Unity read beyond its allocation returns the default safe
 
 Administrator approval starts the exact Profiles CLI or native module's capture
 helper through Windows. A private local pipe binds both process IDs and transfers
-only captured preferences in memory. The helper never receives a destination path
+only discovery metadata or the selected capture in memory, according to the explicit private operation. The helper never receives a destination path
 and never writes profile data. The original process encrypts under the original
 Windows user and fresh immutable ID, stages complete preferences and initialized
 metadata, then publishes the new catalog directory. Capture or write failures

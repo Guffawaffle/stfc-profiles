@@ -11,7 +11,7 @@ native Mac qualification remain required before player support is claimed.
 stfc-profiles list
 stfc-profiles list --archived
 stfc-profiles create "Science" [--game <directory>]
-stfc-profiles users [--json]
+stfc-profiles users [--json] [--approve-elevation]
 stfc-profiles import "Main" --user <Windows-SID> [--game <directory>]
 stfc-profiles import "Main" --user <Windows-SID> [--game <directory>] --approve-elevation
 stfc-profiles rename --profile <id> "Engineering"
@@ -126,3 +126,10 @@ Live qualification must still prove ordinary launch, two distinct accounts from
 one installation, reverse restart persistence, duplicate-profile refusal, isolated
 sign-in callbacks and stopped-session archive/restore. Browser/helper crash
 ordering and updated-client admission/hook compatibility need runtime evidence.
+
+Windows user discovery preserves readable STFC matches and reports partial access
+with `requiresElevation`. `users --approve-elevation` shows the discovery
+explanation, then asks Windows to check protected users if needed. The result
+contains only users with STFC data, names/IDs and availability status; it creates
+no profile and contains no login values. Account copying retains its separate
+import review and conditional approval.

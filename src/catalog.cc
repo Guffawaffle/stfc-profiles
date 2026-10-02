@@ -748,11 +748,16 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     if (operation == "import-sources") {
 #if _WIN32
       Json users = Json::array();
-      const auto destination = ResolveImportUser(CurrentUserSid());
-      for (const auto& user : ImportUsers())
+      const auto destination = CurrentImportUser();
+      const bool elevated = request.value("allowElevation", false);
+      if (elevated && request.value("expectedDestinationSid",std::string{}) != destination.sid)
+        Fail("destination_changed", "The destination Windows user changed. Check the user list again.");
+      const auto discovery = DiscoverImportSources(elevated);
+      for (const auto& user : discovery.users)
         users.push_back({{"sid",user.sid},{"name",user.name},{"currentUser",user.current_user}});
       return Json{{"apiVersion",1},{"ok",true},{"users",users},
-          {"destinationUser",{{"sid",destination.sid},{"name",destination.name}}}}.dump();
+          {"destinationUser",{{"sid",destination.sid},{"name",destination.name}}},
+          {"requiresElevation",discovery.requires_elevation},{"unavailableUsers",discovery.unavailable_users}}.dump();
 #else
       Fail("platform_unavailable", "Windows user import is available on Windows. macOS user import is not implemented yet.");
 #endif
@@ -761,7 +766,7 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     if (operation == "prepare-user-import" || operation == "import-user") {
 #if _WIN32
       const auto source = ResolveImportUser(request.at("sourceUserSid").get<std::string>());
-      const auto destination = ResolveImportUser(CurrentUserSid());
+      const auto destination = CurrentImportUser();
       const auto name = Name(request.at("name").get<std::string>());
       const auto game = Game(request.value("gameDirectory",std::string{}));
       if (operation == "prepare-user-import") {

@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <bcrypt.h>
 #include <array>
+#include <algorithm>
 #include <charconv>
 #include <sstream>
 #include <memory>
@@ -104,7 +105,7 @@ std::wstring RandomNonce() {
   for (auto byte : bytes) { result += hex[byte >> 4]; result += hex[byte & 15]; }
   return result;
 }
-std::vector<NativePreference> ElevatedCapture(const ImportUser& user) {
+Json ElevatedRequest(const Json& request) {
   const auto nonce = RandomNonce();
   const auto name = PipeName(nonce);
   const auto sid = CurrentUserSid();
@@ -177,8 +178,8 @@ std::vector<NativePreference> ElevatedCapture(const ImportUser& user) {
   ULONG client = 0;
   if (!GetNamedPipeClientProcessId(pipe.value, &client) || client != helper_pid)
     Fail("import_transfer", "The import connection did not belong to the approved helper.");
-  Send(pipe.value, {{"sourceUserSid",user.sid}}, true);
-  auto result = Decode(Receive(pipe.value, true));
+  Send(pipe.value, request, true);
+  auto result = Receive(pipe.value, true);
   DisconnectNamedPipe(pipe.value);
   return result;
 }
@@ -188,8 +189,32 @@ std::vector<NativePreference> CaptureImport(const ImportUser& user, bool allow_e
   catch (const CatalogError& error) {
     if (error.Code() != "elevation_required") throw;
     if (!allow_elevation) throw;
-    return ElevatedCapture(user);
+    return Decode(ElevatedRequest({{"operation","capture-user"},{"sourceUserSid",user.sid}}));
   }
+}
+ImportUserDiscovery DiscoverImportSources(bool allow_elevation) {
+  const auto sid = CurrentUserSid();
+  auto result = DiscoverImportUsers(sid);
+  if (!result.requires_elevation || !allow_elevation) return result;
+  const auto response = ElevatedRequest({{"operation","discover-users"},{"destinationUserSid",sid}});
+  if (!response.value("ok",false))
+    throw CatalogError(response.value("code","import_failed"),response.value("message","Windows user discovery could not finish."));
+  const auto& users = response.at("users");
+  if (response.contains("values") || !users.is_array() || users.size() > 10000) Fail("import_transfer", "The user discovery response is invalid.");
+  result.users.clear();
+  for (const auto& entry : users) {
+    const auto source = entry.at("sid").get<std::string>();
+    ValidateImportUserSid(source);
+    const auto name = entry.at("name").get<std::string>();
+    if (name.empty() || name.size() > 32768 || std::any_of(result.users.begin(),result.users.end(),
+        [&](const auto& user) { return user.sid == source; }))
+      Fail("import_transfer", "The user discovery response is invalid.");
+    result.users.push_back({source,name,{},source == sid});
+  }
+  result.requires_elevation = response.at("requiresElevation").get<bool>();
+  result.unavailable_users = response.at("unavailableUsers").get<std::size_t>();
+  if (result.unavailable_users > 10000) Fail("import_transfer", "The user discovery response is invalid.");
+  return result;
 }
 void RunUserImportHelper(std::wstring_view command_line) {
   std::wstringstream input{std::wstring(command_line)};
@@ -206,8 +231,18 @@ void RunUserImportHelper(std::wstring_view command_line) {
     Fail("import_helper", "The private connection belongs to a different app.");
   const auto request = Receive(pipe.value, true);
   try {
-    auto values = CaptureUserPreferences(ResolveImportUser(request.at("sourceUserSid").get<std::string>()));
-    Send(pipe.value, Encode(values), true);
+    const auto operation = request.at("operation").get<std::string>();
+    if (operation == "discover-users") {
+      const auto result = DiscoverImportUsers(request.at("destinationUserSid").get<std::string>());
+      Json users = Json::array();
+      for (const auto& user : result.users)
+        users.push_back({{"sid",user.sid},{"name",user.name},{"currentUser",user.current_user}});
+      Send(pipe.value, {{"ok",true},{"users",users},{"requiresElevation",result.requires_elevation},
+                       {"unavailableUsers",result.unavailable_users}}, true);
+    } else if (operation == "capture-user") {
+      auto values = CaptureUserPreferences(ResolveImportUser(request.at("sourceUserSid").get<std::string>()));
+      Send(pipe.value, Encode(values), true);
+    } else Fail("import_helper", "The private import operation is invalid.");
   } catch (const CatalogError& error) {
     Send(pipe.value, {{"ok", false}, {"code", error.Code()}, {"message", error.what()}}, true);
   } catch (...) {

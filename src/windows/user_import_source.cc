@@ -222,7 +222,12 @@ bool Loaded(const ImportUser& user, RegKey& key) {
   return true;
 }
 void OpenHive(const ImportUser& user, Handle& file) {
-  file.value = CreateFileW((user.directory / L"NTUSER.DAT").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  // Resolve filesystem identity only for this selected source. A protected
+  // unrelated profile must never prevent current-user discovery or capture.
+  std::error_code ec;
+  const auto directory = std::filesystem::weakly_canonical(user.directory, ec);
+  if (ec) { if (ec.value() == ERROR_ACCESS_DENIED) WinError(ERROR_ACCESS_DENIED); Invalid(); }
+  file.value = CreateFileW((directory / L"NTUSER.DAT").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file.value == INVALID_HANDLE_VALUE) WinError(GetLastError());
 }
 std::vector<std::uint8_t> CaptureHive(HANDLE file) {
@@ -352,13 +357,17 @@ public:
     }
     Node(U32(36));
   }
-  std::vector<NativePreference> Preferences() const {
+  std::uint32_t PreferenceNode() const {
     auto key = U32(36);
     std::unordered_set<std::uint32_t> ancestry{key};
     for (const auto part : {u"Software", u"Digit Game Studios Ltd.", u"Star Trek Fleet Command"}) {
       key = Child(key, part); if (!ancestry.insert(key).second) Invalid();
     }
-    const auto node = Node(key); const auto count = U32(node.at+36);
+    Node(key); return key;
+  }
+  bool HasPreferences() const { const auto count = U32(Node(PreferenceNode()).at+36); if (count > MaxValues) Invalid(); return count != 0; }
+  std::vector<NativePreference> Preferences() const {
+    const auto node = Node(PreferenceNode()); const auto count = U32(node.at+36);
     if (count > MaxValues) Invalid();
     std::vector<NativePreference> result; std::size_t total = 0;
     if (!count) return result;
@@ -422,9 +431,46 @@ std::string CurrentUserSid() {
   if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid, &text)) WinError(GetLastError());
   auto result = Utf8(text); LocalFree(text); return result;
 }
-std::vector<ImportUser> ImportUsers() {
+void ValidateImportUserSid(std::string_view sid) {
+  if (sid.empty() || sid.size() > 200 || sid.front() != 'S'
+      || std::any_of(sid.begin()+1, sid.end(), [](char c) { return (c < '0' || c > '9') && c != '-'; })
+      || !OrdinarySid(std::wstring(sid.begin(), sid.end())))
+    throw CatalogError("source_user_missing", "The selected Windows account is no longer available.");
+}
+ImportUser CurrentImportUser() {
+  const auto sid = CurrentUserSid();
+  return {sid, UserName(Wide(sid), std::filesystem::path(Wide(sid))), {}, true};
+}
+namespace {
+ImportUser ReadImportUser(HKEY profiles, const std::wstring& sid, const std::string& current) {
+  RegKey profile;
+  const auto opened = RegOpenKeyExW(profiles, sid.c_str(), 0, KEY_QUERY_VALUE, &profile.value);
+  if (opened != ERROR_SUCCESS) WinError(opened);
+  const std::filesystem::path supplied(RegistryString(profile.value, L"ProfileImagePath"));
+  if (!supplied.is_absolute() || supplied.native().rfind(L"\\\\", 0) == 0) Invalid();
+  // OS-owned metadata only. Do not stat another user's private folder here.
+  const auto directory = supplied.lexically_normal();
+  const auto text = Utf8(sid);
+  return {text, UserName(sid, directory), directory, text == current};
+}
+bool HasSourcePreferences(const ImportUser& user) {
+  RegKey key;
+  if (Loaded(user, key)) {
+    DWORD count = 0;
+    const auto status = RegQueryInfoKeyW(key.value, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                         nullptr, &count, nullptr, nullptr, nullptr, nullptr);
+    if (status != ERROR_SUCCESS) WinError(status);
+    return count != 0; // Presence/count only: never enumerate credential values.
+  }
+  Handle file; OpenHive(user, file);
+  auto hive = CaptureHive(file.value); WipeBytes wipe{hive};
+  return RegistryHiveHasPreferences(hive);
+}
+}
+std::vector<ImportUser> ImportUsers(bool* requires_elevation, std::size_t* unavailable_users) {
   RegKey profiles;
-  const auto error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ProfileList, 0, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY, &profiles.value);
+  const auto error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ProfileList, 0,
+      KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY, &profiles.value);
   if (error != ERROR_SUCCESS) WinError(error);
   const auto current = CurrentUserSid();
   std::vector<ImportUser> result;
@@ -435,27 +481,50 @@ std::vector<ImportUser> ImportUsers() {
     if (status != ERROR_SUCCESS) WinError(status);
     const std::wstring sid(name.data(), size);
     if (!OrdinarySid(sid)) continue;
-    RegKey profile;
-    const auto opened = RegOpenKeyExW(profiles.value, sid.c_str(), 0, KEY_QUERY_VALUE, &profile.value);
-    if (opened != ERROR_SUCCESS) WinError(opened);
-    const std::filesystem::path supplied(RegistryString(profile.value, L"ProfileImagePath"));
-    if (!supplied.is_absolute() || supplied.native().rfind(L"\\\\", 0) == 0) Invalid();
-    std::error_code ec; const auto directory = std::filesystem::weakly_canonical(supplied, ec);
-    if (ec) { if (ec.value() == ERROR_ACCESS_DENIED) WinError(ERROR_ACCESS_DENIED); Invalid(); }
-    const auto text = Utf8(sid);
-    result.push_back({text, UserName(sid, directory), directory, text == current});
+    try { result.push_back(ReadImportUser(profiles.value, sid, current)); }
+    catch (const CatalogError& failure) {
+      if (failure.Code() == "elevation_required" && requires_elevation) *requires_elevation = true;
+      else if (unavailable_users) ++*unavailable_users;
+      else throw;
+    }
   }
   Invalid();
 }
 ImportUser ResolveImportUser(std::string_view sid) {
-  // Reject deterministic invalid input before any registry discovery/permission
-  // check. Invalid SIDs must never manufacture an elevation request.
-  if (sid.empty() || sid.size() > 200 || sid.front() != 'S'
-      || std::any_of(sid.begin()+1, sid.end(), [](char c) { return (c < '0' || c > '9') && c != '-'; })
-      || !OrdinarySid(std::wstring(sid.begin(), sid.end())))
-    throw CatalogError("source_user_missing", "The selected Windows account is no longer available.");
-  for (const auto& user : ImportUsers()) if (user.sid == sid) return user;
-  throw CatalogError("source_user_missing", "The selected Windows account is no longer available.");
+  ValidateImportUserSid(sid);
+  RegKey profiles;
+  const auto error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ProfileList, 0,
+                                  KEY_QUERY_VALUE | KEY_WOW64_64KEY, &profiles.value);
+  if (error != ERROR_SUCCESS) WinError(error);
+  // Resolve only the selected SID, never every unrelated Windows user.
+  return ReadImportUser(profiles.value, Wide(sid), CurrentUserSid());
+}
+ImportUserDiscovery DiscoverImportUsers(std::string_view destination_sid) {
+  ValidateImportUserSid(destination_sid);
+  ImportUserDiscovery result;
+  std::vector<ImportUser> candidates;
+  try { candidates = ImportUsers(&result.requires_elevation, &result.unavailable_users); }
+  catch (const CatalogError& error) {
+    if (error.Code() != "elevation_required") throw;
+    result.requires_elevation = true;
+    // Even a protected global profile list must not hide a readable current user.
+    if (destination_sid == CurrentUserSid()) {
+      try { candidates.push_back(ResolveImportUser(destination_sid)); }
+      catch (const CatalogError&) { /* The incomplete scan remains explicit. */ }
+    }
+  }
+  for (auto& user : candidates) {
+    try {
+      if (HasSourcePreferences(user)) {
+        user.current_user = user.sid == destination_sid;
+        result.users.push_back(std::move(user));
+      }
+    } catch (const CatalogError& error) {
+      if (error.Code() == "elevation_required") result.requires_elevation = true;
+      else if (error.Code() != "source_missing") ++result.unavailable_users;
+    }
+  }
+  return result;
 }
 void CheckImportAccess(const ImportUser& supplied) {
   const auto user = ResolveImportUser(supplied.sid);
@@ -470,6 +539,7 @@ std::vector<NativePreference> CaptureUserPreferences(const ImportUser& supplied)
   WipeBytes wipe{hive};
   return ReadRegistryHivePreferences(hive);
 }
+bool RegistryHiveHasPreferences(const std::vector<std::uint8_t>& hive) { return Hive(hive).HasPreferences(); }
 std::vector<NativePreference> ReadRegistryHivePreferences(const std::vector<std::uint8_t>& hive) { return Hive(hive).Preferences(); }
 } // namespace stfc::profiles
 #endif

@@ -176,7 +176,7 @@ std::wstring SystemRundll32() {
   Check(count && count < system.size(), "native Windows helper path is unavailable");
   return (std::filesystem::path(std::wstring(system.data(), count)) / L"rundll32.exe").native();
 }
-void RunCase(const std::wstring& cli, const std::wstring& native, bool dll, bool wrong_parent) {
+void RunCase(const std::wstring& cli, const std::wstring& native, bool dll, bool wrong_parent, bool discovery = false) {
   Deadline deadline;
   const auto nonce = Nonce();
   const auto name = L"\\\\.\\pipe\\STFCProfilesImport-" + nonce;
@@ -224,7 +224,8 @@ void RunCase(const std::wstring& cli, const std::wstring& native, bool dll, bool
     Check(code != 0 && (!dll || code == 190), "wrong-parent helper did not reject its invocation");
     CheckDisconnected(pipe.value, deadline);
   } else {
-    Send(pipe.value, {{"sourceUserSid", "NOT-A-WINDOWS-SID"}}, deadline, child.process.value);
+    Send(pipe.value, discovery ? Json{{"operation","discover-users"},{"destinationUserSid","NOT-A-WINDOWS-SID"}}
+                              : Json{{"operation","capture-user"},{"sourceUserSid","NOT-A-WINDOWS-SID"}}, deadline, child.process.value);
     const auto response = Receive(pipe.value, deadline, child.process.value);
     Check(response.is_object() && response.contains("ok") && response.at("ok") == false &&
           response.value("code", "") == "source_user_missing" && !response.contains("values"),
@@ -250,7 +251,9 @@ int wmain(int argc, wchar_t** argv) {
     RunCase(cli, native, true, false);
     RunCase(cli, native, false, true);
     RunCase(cli, native, true, true);
-    std::cout << "user import transfer fixtures PASS (4 compiled entrypoint cases)\n";
+    RunCase(cli, native, false, false, true);
+    RunCase(cli, native, true, false, true);
+    std::cout << "user import transfer fixtures PASS (6 compiled entrypoint cases)\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "user import transfer fixtures FAIL: " << error.what() << '\n';

@@ -31,13 +31,23 @@ struct ImportUser {
   bool current_user = false;
 };
 std::string CurrentUserSid();
-std::vector<ImportUser> ImportUsers();
+struct ImportUserDiscovery {
+  std::vector<ImportUser> users;
+  bool requires_elevation = false;
+  std::size_t unavailable_users = 0;
+};
+void ValidateImportUserSid(std::string_view sid);
+ImportUser CurrentImportUser();
+std::vector<ImportUser> ImportUsers(bool* requires_elevation = nullptr, std::size_t* unavailable_users = nullptr);
+ImportUserDiscovery DiscoverImportUsers(std::string_view destination_sid);
+ImportUserDiscovery DiscoverImportSources(bool allow_elevation);
 ImportUser ResolveImportUser(std::string_view sid);
 // Throws CatalogError(elevation_required) only for an actual access denial.
 void CheckImportAccess(const ImportUser& user);
 std::vector<NativePreference> CaptureUserPreferences(const ImportUser& user);
 // Reads an already captured, clean hive in memory; never loads or alters a hive.
 std::vector<NativePreference> ReadRegistryHivePreferences(const std::vector<std::uint8_t>& hive);
+bool RegistryHiveHasPreferences(const std::vector<std::uint8_t>& hive);
 std::u16string UnityPreferenceKey(std::u16string_view registry_name);
 std::vector<NativePreference> CaptureImport(const ImportUser& user, bool allow_elevation);
 void RunUserImportHelper(std::wstring_view command_line);

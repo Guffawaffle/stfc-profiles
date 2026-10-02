@@ -204,6 +204,16 @@ void LoadedRegistryLinks() {
   }
   fixture.Cleanup();
 }
+void DiscoveryDoesNotDecodeCredentials() {
+  Fixture fixture;
+  fixture.Value(NativeName(Hashed("foo")), REG_DWORD, {1,0,0,0}, true); fixture.Finish();
+  auto corrupt_value = fixture.bytes;
+  Put32(corrupt_value,4096+fixture.values[0]+4+4,0x80000008);
+  Check(RegistryHiveHasPreferences(corrupt_value), "discovery decoded credential payload instead of checking key presence");
+  Reject([&]{ReadRegistryHivePreferences(corrupt_value);});
+  Fixture missing; missing.Finish("li",true);
+  Reject([&]{RegistryHiveHasPreferences(missing.bytes);},"source_missing");
+}
 void RejectDirtyAndMalformed() {
   Fixture f;f.Value(NativeName(Hashed("foo")),REG_DWORD,{1,0,0,0},true);f.Finish("ri");
   auto bad=f.bytes;Put32(bad,8,8);Reject([&]{ReadRegistryHivePreferences(bad);});
@@ -224,4 +234,4 @@ void RejectDirtyAndMalformed() {
   Fixture duplicate;duplicate.Value(NativeName(Hashed("foo")),REG_DWORD,{1,0,0,0},true);duplicate.values.push_back(duplicate.values[0]);duplicate.Finish();Reject([&]{ReadRegistryHivePreferences(duplicate.bytes);});
 }
 }
-int main(){try{AllListKindsAndRawTypes();UnicodeAndHash();BigDataAndBounds();RejectDirtyAndMalformed();InvalidUserSelection();LoadedRegistryLinks();std::cout<<"PASS: synthetic Windows import source fixtures\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{AllListKindsAndRawTypes();UnicodeAndHash();BigDataAndBounds();RejectDirtyAndMalformed();DiscoveryDoesNotDecodeCredentials();InvalidUserSelection();LoadedRegistryLinks();std::cout<<"PASS: synthetic Windows import source fixtures\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
