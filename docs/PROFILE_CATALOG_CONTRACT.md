@@ -140,6 +140,52 @@ coordinator with an immutable ID and explicit or saved installation selection.
 Renaming a profile does not invalidate its shortcut. Native macOS launch input
 and protection follow the same identity/lifecycle contract and need qualification.
 
+## User import and elevation explanation
+
+Accepted UX direction, 2026-10-02. Import is selected by source OS user, not by
+commander. Two Windows users may hold the same game account and still be separate
+import sources with separate destination profile IDs. The import operation,
+preference conversion and final access/transfer design remain unimplemented and
+under study; this section records the accepted explanation requirement.
+
+Determine the selected source's access requirements before requesting elevation.
+Current-user import should use ordinary read access when available. Another
+user's protected or unloaded store may require administrator access, depending
+on the chosen implementation. Do not elevate merely because the operation is
+named import, or treat corrupt data, unsupported formats or redirected storage
+as permission failures that administrator access can solve.
+
+When administrator access is required, show an application explanation BEFORE
+opening the Windows UAC prompt. It must identify:
+
+- The selected source Windows user and STFC data being read, including saved
+  login state and game preferences.
+- Why this particular source/access method needs administrator permission.
+- The destination profile name and destination Windows user.
+- The actual action and scope: copying selected STFC state into a new profile
+  while preserving the source state.
+- That continuing will open the Windows permission prompt.
+
+Example for an other-user import:
+
+> Administrator permission needed
+>
+> Windows protects josep's saved STFC data. Profiles needs administrator
+> permission to read that user's saved login and game settings and copy them
+> into a new profile named Main for Windows user Guff. josep's saved game state
+> will be kept. Continuing opens the Windows permission prompt.
+
+Buttons: **Continue** and **Cancel**. Source, destination and reason come from the
+actual import plan; the example names are not defaults. Declining either this
+explanation or UAC cancels the request without publishing a profile or changing
+source state. Current-user sources requiring elevation receive an accurate
+reason for their own protected location, not the other-user explanation.
+
+Bridge and the standalone product must present the same operation facts. CLI
+imports must explain those facts before requesting elevation as well; final
+interactive/noninteractive presentation is still to be specified. Elevation
+execution and transfer design remain separate from this accepted UI requirement.
+
 ## Installation updates in the MVP
 
 On 2026-09-29 Guff added installation selection and game updating to the Profiles
@@ -167,7 +213,7 @@ central `registry.json` proposal, and the old `STFC Community Mod\Profiles` targ
 path. It also supersedes deleting only a registry entry to unregister a profile:
 archiving now performs that catalog removal while retaining the whole directory.
 The old mandatory-profile bare-launch choice and installation-selector experiment
-remain superseded. No installation selector, adoption, compatibility shim or
+remain superseded. No installation selector, installation-marker adoption, compatibility shim or
 legacy fallback is part of this design. The feature has no player deployments;
 implementation replaces the unshipped design directly.
 
