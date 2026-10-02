@@ -181,6 +181,16 @@ explanation or UAC cancels the request without publishing a profile or changing
 source state. Current-user sources requiring elevation receive an accurate
 reason for their own protected location, not the other-user explanation.
 
+For a standard Windows user, use the native UAC credential prompt to authorize
+an administrator account; Profiles does not collect or save that account's
+password. The explanation says that Windows may ask for an administrator's
+username and password. The administrator authorizes the required helper access,
+not a change of import source or destination owner. The original requesting
+user remains the destination catalog owner; do not resolve the destination from
+the administrator helper's own LOCALAPPDATA or encrypt the destination store
+under that administrator. Windows policy may deny elevation, which must remain
+an explicit canceled/blocked import rather than prompting through another path.
+
 Bridge and the standalone product must present the same operation facts. CLI
 imports must explain those facts before requesting elevation as well; final
 interactive/noninteractive presentation is still to be specified. Elevation
