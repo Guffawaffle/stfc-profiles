@@ -162,8 +162,9 @@ bool LaunchIsolatedBrowser(const std::filesystem::path& root, std::string_view i
   if (!ready.value || GetLastError()==ERROR_ALREADY_EXISTS) return false;
   std::wstring wide_id(id.begin(),id.end());
   std::wstring address(reinterpret_cast<const wchar_t*>(url.data()),url.size());
+  // rundll32 appends W to select UTF-16; naming the W export directly selects ANSI.
   auto command=Quote(runner.wstring())+L" "+Quote(std::wstring(path.data(),length))
-               +L",STFCProfilesBrowserLaunchW --root "+Quote(root.wstring())+L" --profile "+Quote(wide_id)
+               +L",STFCProfilesBrowserLaunch --root "+Quote(root.wstring())+L" --profile "+Quote(wide_id)
                +L" --ready-event "+Quote(event_name)+L" --url "+Quote(address);
   STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
   if (!CreateProcessW(runner.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,
