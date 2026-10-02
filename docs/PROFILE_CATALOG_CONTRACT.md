@@ -168,18 +168,29 @@ opening the Windows UAC prompt. It must identify:
 
 Example for an other-user import:
 
-> Administrator permission needed
+> Import josep's STFC setup
 >
-> Windows protects josep's saved STFC data. Profiles needs administrator
-> permission to read that user's saved login and game settings and copy them
-> into a new profile named Main for Windows user Guff. josep's saved game state
-> will be kept. Continuing opens the Windows permission prompt.
+> We'll copy josep's saved STFC login and game settings into **Main**, a new
+> profile for Windows user **Guff**. josep's original setup will stay as it is.
+>
+> Windows needs administrator approval to read another Windows user's saved
+> game data. Choose **Continue** to open the Windows permission prompt. If
+> needed, Windows will ask for an administrator's username and password.
 
-Buttons: **Continue** and **Cancel**. Source, destination and reason come from the
+Buttons: **Continue** and **Not now**. Source, destination and reason come from the
 actual import plan; the example names are not defaults. Declining either this
 explanation or UAC cancels the request without publishing a profile or changing
 source state. Current-user sources requiring elevation receive an accurate
 reason for their own protected location, not the other-user explanation.
+
+Accepted presentation direction, 2026-10-02: keep this friendly and informative.
+Use a neutral information presentation, plain language and short paragraphs;
+avoid alarming warning icons or technical permission jargon. Keep source,
+destination, copied data and the next Windows prompt visible in the main text.
+Additional explanation can live under an accessible **Why is this needed?**
+expander. Do not hide required facts in a tooltip or the expander. Support keyboard
+navigation and screen-reader labels, readable contrast and OS text scaling.
+**Not now** and Escape dismiss the dialog with the user's selection retained.
 
 For a standard Windows user, use the native UAC credential prompt to authorize
 an administrator account; Profiles does not collect or save that account's
