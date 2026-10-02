@@ -1,5 +1,6 @@
 #include "stfc_profiles/catalog.h"
 #include "stfc_profiles/session.h"
+#include "stfc_profiles/user_import.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #if _WIN32
 #include <Windows.h>
 #include <shobjidl.h>
+#include <commctrl.h>
 #else
 #include <cerrno>
 #include <csignal>
@@ -33,26 +35,27 @@ struct Arguments {
   std::string operation;
   std::map<std::string,std::string> values;
   std::vector<std::string> positional;
-  bool json=false,archived=false,permanent=false;
+  bool json=false,archived=false,permanent=false,approve_elevation=false;
 };
 Arguments Parse(const std::vector<std::string>& input)
 {
   Arguments result;
   for (std::size_t i=1;i<input.size();++i) {
     const auto& argument=input[i];
+    if (argument=="--approve-elevation") { result.approve_elevation=true; continue; }
     if (argument=="--json") { result.json=true; continue; }
     if (argument=="--archived") { result.archived=true; continue; }
     if (argument=="--permanent") { result.permanent=true; continue; }
     if (argument=="--profile" || argument=="--game" || argument=="--game-dir" || argument=="--root"
         || argument=="--output" || argument=="--expected-revision" || argument=="--expected-version"
-        || argument=="--url" || argument=="--ready-fd") {
+        || argument=="--url" || argument=="--ready-fd" || argument=="--user") {
       if (i+1==input.size() || input[i+1].starts_with("--"))
         throw std::runtime_error(argument+" requires a separate value");
       if (!result.values.emplace(argument=="--game-dir"?"--game":argument,input[++i]).second)
         throw std::runtime_error(argument+" was specified more than once");
       continue;
     }
-    if (argument.starts_with("--") && argument!="--help" && argument!="--internal-browser")
+    if (argument.starts_with("--") && argument!="--help" && argument!="--internal-browser" && argument!="--internal-user-import")
       throw std::runtime_error("unknown option: "+argument);
     if (result.operation.empty()) result.operation=argument;
     else result.positional.push_back(argument);
@@ -72,10 +75,42 @@ Json Call(Json request)
 }
 Json Failure(std::string_view code,std::string_view message)
 { return {{"apiVersion",1},{"ok",false},{"error",{{"code",code},{"message",message}}}}; }
+#if _WIN32
+std::wstring ImportWide(std::string_view text) {
+  const auto length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),nullptr,0);
+  if (!length) throw std::runtime_error("The import explanation could not be displayed.");
+  std::wstring output(length,L'\0');
+  MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),output.data(),length);
+  return output;
+}
+bool ConfirmImportElevation(const Json& plan) {
+  const auto title=ImportWide("Import "+plan.at("sourceUserName").get<std::string>()+"'s STFC setup");
+  const auto content=ImportWide("We'll copy the saved STFC login and game settings into "+plan.at("name").get<std::string>()
+      +", a new profile for Windows user "+plan.at("destinationUserName").get<std::string>()
+      +". The original setup will stay as it is.\n\n"+plan.at("reason").get<std::string>()
+      +" Choose Continue to open the Windows permission prompt. If needed, Windows will ask for an administrator's username and password.");
+  TASKDIALOG_BUTTON buttons[]{{IDOK,L"&Continue"},{IDCANCEL,L"&Not now"}};
+  TASKDIALOGCONFIG dialog{sizeof(dialog)};
+  dialog.dwFlags=TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+  dialog.pszWindowTitle=L"STFC Profiles"; dialog.pszMainIcon=TD_INFORMATION_ICON;
+  dialog.pszMainInstruction=title.c_str(); dialog.pszContent=content.c_str();
+  dialog.cButtons=2; dialog.pButtons=buttons; dialog.nDefaultButton=IDCANCEL;
+  dialog.pszExpandedInformation=L"The helper reads only the selected user's STFC preferences. The new profile is saved for your current Windows user. Profiles never asks for or stores a Windows password.";
+  dialog.pszExpandedControlText=L"Why is this needed?";
+  int selected=IDCANCEL;
+  if (FAILED(TaskDialogIndirect(&dialog,&selected,nullptr,nullptr)))
+    throw std::runtime_error("The import explanation could not open. No permission request was made.");
+  return selected==IDOK;
+}
+#endif
 void Help()
 {
   std::cout<<"stfc-profiles list [--archived]\n"
            <<"stfc-profiles create NAME [--game PATH]\n"
+           <<"stfc-profiles users [--json]\n"
+           <<"stfc-profiles import NAME --user SID [--game PATH] [--approve-elevation]\n"
+           <<"  Imports saved login and game preferences by Windows user, preserving the source.\n"
+           <<"  --approve-elevation shows the explanation, then opens native Windows approval if needed.\n"
            <<"stfc-profiles rename --profile ID NAME\n"
            <<"stfc-profiles edit --profile ID [--game PATH]\n"
            <<"stfc-profiles launch --profile ID [--game PATH]\n"
@@ -207,6 +242,57 @@ int Run(const std::vector<std::string>& input)
 #if ! _WIN32
     if (args.operation=="--internal-browser") return InternalBrowser(args);
 #endif
+#if _WIN32
+    if (args.operation=="--internal-user-import") {
+      if (args.positional.size()!=2 || args.json || args.approve_elevation || !args.values.empty())
+        throw std::runtime_error("invalid private import helper arguments");
+      const auto arguments=args.positional[0]+" "+args.positional[1];
+      stfc::profiles::RunUserImportHelper(std::wstring(arguments.begin(),arguments.end()));
+      return 0;
+    }
+#endif
+    if (args.operation=="users") args.operation="import-sources";
+    if (args.operation=="import") {
+      if (args.positional.size()!=1 || args.archived || args.permanent
+          || args.values.contains("--profile") || args.values.contains("--expected-revision")
+          || args.values.contains("--expected-version") || args.values.contains("--output")
+          || args.values.contains("--url") || args.values.contains("--ready-fd"))
+        throw std::runtime_error("import requires one new display name and --user SID");
+      Json query{{"operation","prepare-user-import"},{"name",args.positional[0]},
+                 {"sourceUserSid",Required(args,"--user")}};
+      if (args.values.contains("--root")) query["root"]=args.values.at("--root");
+      if (args.values.contains("--game")) query["gameDirectory"]=args.values.at("--game");
+      auto response=Call(query);
+      if (response.value("ok",false)) {
+        const auto& plan=response.at("importPlan");
+        // stderr leaves --json stdout machine-readable; permission facts are
+        // still shown before any UAC request, including noninteractive callers.
+        std::cerr<<"Import "<<plan.at("sourceUserName").get<std::string>()<<"'s STFC setup\n"
+                 <<"We'll copy the saved STFC login and game settings into "<<plan.at("name").get<std::string>()
+                 <<", a new profile for Windows user "<<plan.at("destinationUserName").get<std::string>()
+                 <<". The original setup will stay as it is.\n";
+        if (plan.at("requiresElevation").get<bool>()) {
+          std::cerr<<plan.at("reason").get<std::string>()
+                   <<" Windows may ask for an administrator's username and password.\n";
+          if (!args.approve_elevation) response=Failure("elevation_required",
+              "To continue and open the Windows permission prompt, rerun with --approve-elevation. No profile was created.");
+#if _WIN32
+          else if (!ConfirmImportElevation(plan)) response=Failure("import_cancelled",
+              "Import was cancelled. No profile was created.");
+#endif
+        }
+        if (response.value("ok",false)) {
+          query["operation"]="import-user";
+          query["expectedDestinationSid"]=plan.at("destinationUserSid");
+          query["allowElevation"]=args.approve_elevation && plan.at("requiresElevation").get<bool>();
+          response=Call(query);
+        }
+      }
+      if (json_output) std::cout<<response.dump()<<'\n';else std::cout<<response.dump(2)<<'\n';
+      return response.value("ok",false)?0:1;
+    }
+    if (args.values.contains("--user") || args.approve_elevation)
+      throw std::runtime_error("--user and --approve-elevation apply only to import");
     if (args.operation=="location") args.operation="catalog-location";
     bool installation=false;
     if (args.operation=="game") {
@@ -232,11 +318,11 @@ int Run(const std::vector<std::string>& input)
     }
     if (!installation && args.operation!="list" && args.operation!="create" && args.operation!="rename" && args.operation!="edit"
         && args.operation!="archive" && args.operation!="restore" && args.operation!="delete"
-        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut" && args.operation!="catalog-location")
+        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut" && args.operation!="catalog-location" && args.operation!="import-sources")
       throw std::runtime_error("unknown command: "+args.operation);
-    if (args.operation=="catalog-location" && args.values.contains("--root"))
+    if ((args.operation=="catalog-location" || args.operation=="import-sources") && args.values.contains("--root"))
       throw std::runtime_error("location reports the OS-user root; omit --root");
-    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions" || args.operation=="catalog-location"))
+    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions" || args.operation=="catalog-location" || args.operation=="import-sources"))
       throw std::runtime_error("--profile is not accepted for this command");
     if (args.values.contains("--output") && args.operation!="shortcut")
       throw std::runtime_error("--output applies only to shortcut");
@@ -267,7 +353,7 @@ int Run(const std::vector<std::string>& input)
       if (args.positional.size()!=1) throw std::runtime_error("provide one display name; quote names containing spaces");
       request["name"]=args.positional.front();
     } else if (!args.positional.empty()) throw std::runtime_error("unexpected positional argument");
-    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions" && args.operation!="catalog-location")
+    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions" && args.operation!="catalog-location" && args.operation!="import-sources")
       request["id"]=Required(args,"--profile");
     if (args.operation=="delete") {
       if (!args.permanent || !args.archived) throw std::runtime_error("permanent deletion requires --archived --permanent");

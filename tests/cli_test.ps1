@@ -41,6 +41,14 @@ function Invoke-ProfileCli {
     return $result
 }
 try {
+    $privateHelper = Invoke-ProfileCli -CliArguments @('--internal-user-import', '00000000000000000000000000000000', '0') -ExpectedSuccess $false
+    if ($privateHelper.error.message -ne 'invalid private import helper arguments') {
+        throw 'Private helper entry was rejected by the option parser before its strict validation.'
+    }
+    $missingUser = Invoke-ProfileCli -CliArguments @('import', 'Synthetic', '--user', 'NOT-A-WINDOWS-SID') -ExpectedSuccess $false
+    if ($missingUser.error.code -ne 'source_user_missing') { throw 'Invalid import source did not return the shared source error.' }
+    $emptyAfterFailedImport = Invoke-ProfileCli -CliArguments @('list')
+    if ($emptyAfterFailedImport.profiles.Count -ne 0) { throw 'Failed source import published a profile.' }
     $created = Invoke-ProfileCli -CliArguments @('create', 'Science Ω')
     $profileId = $created.profile.id
     if ($profileId -notmatch '^[0-9a-f]{32}$') { throw 'CLI create did not return an immutable profile ID.' }

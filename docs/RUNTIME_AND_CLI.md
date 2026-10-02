@@ -11,6 +11,9 @@ native Mac qualification remain required before player support is claimed.
 stfc-profiles list
 stfc-profiles list --archived
 stfc-profiles create "Science" [--game <directory>]
+stfc-profiles users [--json]
+stfc-profiles import "Main" --user <Windows-SID> [--game <directory>]
+stfc-profiles import "Main" --user <Windows-SID> [--game <directory>] --approve-elevation
 stfc-profiles rename --profile <id> "Engineering"
 stfc-profiles edit --profile <id> --game <directory>
 stfc-profiles launch --profile <id> [--game <directory>]
@@ -33,6 +36,20 @@ catalog root, so launching a non-default catalog is rejected rather than silentl
 opening a different profile. `--expected-revision <revision>` binds a metadata
 mutation to a prior observation. Without that option, the CLI reads the selected
 profile immediately before submitting its revision-bound mutation.
+
+Windows `users` lists source Windows accounts; import selects the exact SID,
+not a commander or display-name match. Import makes a one-time copy of saved STFC
+login/preferences into a fresh immutable profile ID for the current Windows user.
+Close the source user's game first so its preferences have finished saving. The
+source setup stays intact and profiles may share the same preferred game folder.
+The CLI displays the source/destination explanation before copying. Ordinary
+access is used when available. If access is denied, rerun with
+`--approve-elevation`; a native **Continue / Not now** information dialog precedes
+Windows UAC. Native Windows credentials, when required, are entered only into
+Windows. `--json` keeps response JSON on stdout and explanation text on stderr.
+No account values enter the public API or its error output. Cancellation creates
+no published profile. Import does not select the new profile for another host.
+See the [user import contract](PROFILE_CATALOG_CONTRACT.md#user-import-and-elevation-explanation).
 
 Native Windows shortcuts point to the CLI with the immutable ID. Names can
 change without invalidating the shortcut. Publication stages and flushes the
@@ -68,7 +85,7 @@ the encrypted bin and its initialization flag cannot turn an established profile
 into a new empty account.
 
 Windows uses user-bound DPAPI with profile-ID-specific entropy. The decrypted
-payload also embeds the ID and typed preferences; copied ciphertext cannot open
+payload also embeds the ID, typed preferences and imported native values; copied ciphertext cannot open
 under a different ID. macOS source stores a per-profile P-256 private key in the
 user Keychain and protects files using Security-framework ECIES X9.63 SHA-256
 AES-GCM. The private key is accessed through Security APIs without exporting it.
@@ -85,9 +102,14 @@ portable to arbitrary OS users.
 ## Verification
 
 `prefs-store-tests` uses only synthetic secrets and temporary catalog state. It
-covers typed preference persistence, immutable-ID encryption binding, matching
+covers native import byte preservation and schema 1 reopen, typed preference persistence, immutable-ID encryption binding, matching
 lease requirements, loss of established files, duplicate writers, stopped
 archive/restore, interrupted first use and validated backup recovery.
+
+`user-import-source-tests` uses generated hives and synthetic values only. It
+covers inline and segmented data, all supported registry list layouts, exact
+Unity hash/Unicode normalization, eight-byte DWORD floats and rejection of dirty,
+malformed, cyclic, redirected or out-of-bounds cells.
 
 `catalog-tests` covers stale revisions, duplicate JSON properties/active-archive
 identity, incomplete metadata, browser/writer exclusion, archive/restore and

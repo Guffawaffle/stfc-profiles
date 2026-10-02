@@ -9,7 +9,7 @@ in progress.
 
 - `stfc-profiles-core`: shared directory catalog, immutable IDs, encrypted
   preference storage and lifetime profile/data/installation exclusion.
-- `stfc-profiles`: CLI for catalog operations, launch, shortcuts and game updates.
+- `stfc-profiles`: CLI for catalog operations, Windows user import, launch, shortcuts and game updates.
 - `stfc-profiles-native`: versioned UTF-8 JSON API used by Bridge.
 - Community-mod adapter: takes a profile ID and store mode explicitly from its
   host, then installs preference and browser hooks through IL2CPP/SPUD.

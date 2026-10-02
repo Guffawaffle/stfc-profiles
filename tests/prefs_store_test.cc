@@ -1,9 +1,7 @@
 #include "stfc_profiles/catalog.h"
 #include "stfc_profiles/prefs_store.h"
 #include "stfc_profiles/session.h"
-#if __APPLE__
 #include "../src/prefs_crypto.h"
-#endif
 #include <nlohmann/json.hpp>
 #include <bit>
 #include <filesystem>
@@ -189,11 +187,81 @@ void InterruptedFirstUsePreservesCommittedValues()
   Check(store.GetInt(u"in-progress",0)==7,"interrupted first use reset committed values");
   store.FinishNewProfile();lease.MarkReady();
 }
+
+void EstablishedVersionOneRemainsReadable()
+{
+  Fixture f; const auto id=f.Create("Synthetic Existing v1");
+  {
+    SessionLease lease(f.root,id); ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    store.SetInt(u"existing",314); store.SetFloat(u"decimal",1.75f); store.SetString(u"login",u"SYNTHETIC_V1");
+    lease.MarkReady();
+  }
+  // Produce a synthetic previous-schema store: the typed layout is unchanged.
+  auto plain=detail::ReadProtectedPrefs(f.File(id),id);
+  Check(plain.size()>12,"synthetic store too short"); plain[8]=1;plain[9]=plain[10]=plain[11]=0;
+  detail::WriteProtectedPrefs(f.File(id),id,plain,true);detail::WipePrefsBytes(plain);
+  SessionLease lease(f.root,id); ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+  Check(store.GetInt(u"existing",0)==314 && store.GetFloat(u"decimal",0)==1.75f
+        && store.GetString(u"login")==u"SYNTHETIC_V1","existing schema1 profile lost during import upgrade");
+  store.SetInt(u"existing",315);
+  Check(store.GetString(u"login")==u"SYNTHETIC_V1","schema upgrade lost existing login");
+}
+void NativeImportRetainsUnitySemantics()
+{
+  Fixture f; const auto id=f.Create("Synthetic Imported");
+  const auto directory=f.root/"profiles"/id;
+  const auto staging=f.root/"profiles"/(".import-"+id);
+  fs::create_directory(staging);
+  auto meta=Json::parse(Bytes(directory/"metadata.json"));
+  meta["preferencesInitialized"]=true;
+  std::ofstream(staging/"metadata.json")<<meta.dump();
+  fs::create_directory(staging/"logs");
+  auto double_bytes=[](double value) {
+    const auto bits=std::bit_cast<std::uint64_t>(value);
+    std::vector<std::uint8_t> output;
+    for (unsigned i=0;i<8;++i) output.push_back(static_cast<std::uint8_t>(bits>>(8*i)));
+    return output;
+  };
+  std::vector<NativePreference> native{
+    {u"integer",4,{0xff,0xff,0xff,0xff}},
+    {u"decimal",4,double_bytes(150.25)},
+    {u"ambiguous",3,{65,66,67,0}},
+    {u"unicode",3,{0xf0,0x9f,0x9a,0x80,0}},
+    {u"secret",3,{'S','Y','N','T','H','E','T','I','C','_','I','M','P','O','R','T',0}},
+    {u"zero",3,{}}, {u"ascii-invalid-tail",1,{'A',0,0x80}},
+    {u"permissive",3,{0xc0,0xaf,0}}, {u"byte80",3,{0x80,0}},
+    {u"truncated",3,{0xf0,0}}, {u"cross-nul",3,{0xe2,0}},
+    {u"unknown",7,{1,2,3,4,5}}
+  };
+  Throws([&]{ProfilePrefsStore::CreateImported(directory,id,native);},"published directory accepted as import staging");
+  Throws([&]{ProfilePrefsStore::CreateImported(staging,id,{});},"empty preferences published");
+  ProfilePrefsStore::CreateImported(staging,id,native);
+  Check(Bytes(staging/"player_prefs.bin").find("SYNTHETIC_IMPORT")==std::string::npos,"import secret persisted as plaintext");
+  fs::remove_all(directory); fs::rename(staging,directory);
+  {
+    SessionLease lease(f.root,id);
+    Check(lease.PreferencesInitialized(),"import omitted initialized metadata");
+    ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+    Check(store.GetInt(u"integer",0)==-1,"native int changed");
+    Check(store.GetFloat(u"decimal",0)==150.25f,"8byte DWORD float truncated");
+    Check(store.GetInt(u"decimal",99)==99,"native int accepted eight bytes");
+    Check(store.GetInt(u"ambiguous",0)==0x00434241 && store.GetString(u"ambiguous")==u"ABC","binary value lost alternate getter interpretation");
+    Check(store.GetString(u"unicode")==u"\U0001f680","native UTF8 Unicode lost");
+    Check(!store.GetString(u"zero") && !store.GetString(u"ascii-invalid-tail"),"native string fallback changed");
+    Check(store.GetString(u"permissive")==u"/" && store.GetString(u"byte80")==u"\u0080","Unity permissive decoding changed");
+    Check(!store.GetString(u"truncated") && store.GetString(u"cross-nul")==u"\u2000","native decoder bound changed");
+    Check(store.HasKey(u"unknown") && !store.GetString(u"unknown"),"unknown native value was dropped");
+    store.SetInt(u"integer",72); store.SetFloat(u"decimal",1.25f);
+  }
+  SessionLease lease(f.root,id); ProfilePrefsStore reopened(f.root,id,ProfileOpenMode::Existing,lease);
+  Check(reopened.GetInt(u"integer",0)==72 && reopened.GetFloat(u"decimal",0)==1.25f,"normal writes failed after import");
+  Check(reopened.GetString(u"secret")==u"SYNTHETIC_IMPORT","imported login lost on save and restart");
+}
 } // namespace
 int main()
 {
   try {
-    PersistenceAndEncryption();MissingEstablishedDataNeverReinitializes();WrongIdentityAndLeaseRefused();
+    EstablishedVersionOneRemainsReadable();NativeImportRetainsUnitySemantics();PersistenceAndEncryption();MissingEstablishedDataNeverReinitializes();WrongIdentityAndLeaseRefused();
     StableLeaseExcludesWritersAndMoves();RecoveryValidatesBeforeReplacing();RootAliasesPreserveLeaseIdentity();InterruptedFirstUsePreservesCommittedValues();
     std::cout<<"profile preference store tests passed\n";return 0;
   } catch (const std::exception& error) { std::cerr<<"profile preference tests failed: "<<error.what()<<'\n';return 1; }

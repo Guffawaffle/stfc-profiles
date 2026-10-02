@@ -2,6 +2,8 @@
 #include "stfc_profiles/session.h"
 #include "stfc_profiles/installation.h"
 #include "stfc_profiles/identity.h"
+#include "stfc_profiles/prefs_store.h"
+#include "stfc_profiles/user_import.h"
 #include "prefs_crypto.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -743,7 +745,70 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     if (operation == "installation-status" || operation == "check-game-update"
         || operation == "update-game" || operation == "recover-game-update")
       return ExecuteInstallationRequest(request_utf8);
+    if (operation == "import-sources") {
+#if _WIN32
+      Json users = Json::array();
+      const auto destination = ResolveImportUser(CurrentUserSid());
+      for (const auto& user : ImportUsers())
+        users.push_back({{"sid",user.sid},{"name",user.name},{"currentUser",user.current_user}});
+      return Json{{"apiVersion",1},{"ok",true},{"users",users},
+          {"destinationUser",{{"sid",destination.sid},{"name",destination.name}}}}.dump();
+#else
+      Fail("platform_unavailable", "Windows user import is available on Windows. macOS user import is not implemented yet.");
+#endif
+    }
     const auto root = CatalogRoot(request.contains("root") ? Path(request.at("root").get<std::string>()) : DefaultCatalogRoot());
+    if (operation == "prepare-user-import" || operation == "import-user") {
+#if _WIN32
+      const auto source = ResolveImportUser(request.at("sourceUserSid").get<std::string>());
+      const auto destination = ResolveImportUser(CurrentUserSid());
+      const auto name = Name(request.at("name").get<std::string>());
+      const auto game = Game(request.value("gameDirectory",std::string{}));
+      if (operation == "prepare-user-import") {
+        bool elevation = false; std::string reason;
+        try { CheckImportAccess(source); }
+        catch (const CatalogError& error) {
+          if (error.Code() != "elevation_required") throw;
+          elevation = true; reason = source.current_user
+            ? "Windows needs administrator approval to read this user's protected saved game data."
+            : "Windows needs administrator approval to read another Windows user's saved game data.";
+        }
+        return Json{{"apiVersion",1},{"ok",true},{"importPlan",{
+          {"sourceUserSid",source.sid},{"sourceUserName",source.name},
+          {"destinationUserSid",destination.sid},{"destinationUserName",destination.name},
+          {"name",name},{"gameDirectory",game},{"requiresElevation",elevation},{"reason",reason}}}}.dump();
+      }
+      if (request.value("expectedDestinationSid",std::string{}) != destination.sid)
+        Fail("destination_changed", "The destination Windows user changed. Prepare the import again.");
+      // The elevated helper captures only. Publication and encryption always run
+      // under this original destination user, after capture succeeds.
+      auto preferences = CaptureImport(source,request.value("allowElevation",false));
+      Lock catalog(root / ".locks" / "catalog.lock",false,true);
+      const auto id = NewId();
+      if (fs::exists(root / "profiles" / id) || fs::exists(root / "archives" / id))
+        Fail("duplicate_id", "The generated profile ID already exists. Try importing again.");
+      const auto staging = root / "profiles" / (".import-" + id);
+      if (!fs::create_directory(staging)) Fail("write_failed", "The new profile could not be staged.");
+      try {
+        fs::create_directory(staging / "logs");
+        ProfilePrefsStore::CreateImported(staging,id,preferences);
+        Atomic(staging / "metadata.json",Json{{"schemaVersion",1},{"name",name},{"gameDirectory",game},
+          {"preferencesInitialized",true},{"importSourceUserSid",source.sid}}.dump(2) + "\n");
+        fs::rename(staging,root / "profiles" / id);
+      } catch (...) {
+        // A failed unpublished copy is safe to remove, never the source store.
+        std::error_code cleanup;
+        fs::remove_all(staging,cleanup);
+        if (!cleanup) detail::EraseProtectedPrefsIdentity(id);
+        throw;
+      }
+      return Json{{"apiVersion",1},{"ok",true},{"profile",Load(root,id,false).public_data},
+                  {"revision",Discover(root,false)["revision"]}}.dump();
+#else
+      Fail("platform_unavailable", "Windows user import is available on Windows. macOS user import is not implemented yet.");
+#endif
+    }
+
     if (operation == "launch") return Launch(root, request).dump();
     Lock catalog(root / ".locks" / "catalog.lock", false, true);
     const bool archived = request.value("archived", false);

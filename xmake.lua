@@ -27,10 +27,31 @@ for _, entry in ipairs({
         add_deps("stfc-profiles-core")
         add_files(entry[2])
         set_exceptions("cxx")
-        if is_plat("windows") then add_syslinks("uuid") end
+        if is_plat("windows") then
+            add_syslinks("uuid")
+            if entry[1] == "stfc-profiles" then
+                add_syslinks("comctl32")
+                add_ldflags("/MANIFEST:EMBED", "/MANIFESTINPUT:" .. path.join(os.scriptdir(), "cli/windows.manifest"), {force = true})
+            end
+        end
     target_end()
 end
 if is_plat("windows") then
+    target("user-import-transfer-tests")
+        set_kind("binary")
+        add_deps("stfc-profiles", "stfc-profiles-native", {inherit = false})
+        add_files("tests/user_import_transfer_test.cc")
+        add_packages("nlohmann_json")
+        add_defines("NOMINMAX")
+        add_syslinks("bcrypt", "advapi32")
+        set_exceptions("cxx")
+    target_end()
+    target("user-import-source-tests")
+        set_kind("binary")
+        add_deps("stfc-profiles-core")
+        add_files("tests/user_import_source_test.cc")
+        set_exceptions("cxx")
+    target_end()
     target("installation-tests")
         set_kind("binary")
         add_deps("stfc-profiles-core")

@@ -67,7 +67,11 @@ try {
     Invoke-RecordedXMake -Arguments @('run', 'identity-tests')
     Invoke-RecordedXMake -Arguments @('run', 'prefs-store-tests')
     Invoke-RecordedXMake -Arguments @('run', 'catalog-tests')
-    if ($Platform -eq 'windows') { Invoke-RecordedXMake -Arguments @('run', 'installation-tests') }
+    if ($Platform -eq 'windows') {
+        Invoke-RecordedXMake -Arguments @('run', 'installation-tests')
+        Invoke-RecordedXMake -Arguments @('run', 'user-import-source-tests')
+        Invoke-RecordedXMake -Arguments @('run', 'user-import-transfer-tests', (Join-Path $taskRoot "build/$Platform/$Architecture/release/stfc-profiles.exe"), (Join-Path $taskRoot "build/$Platform/$Architecture/release/stfc-profiles-native.dll"))
+    }
     Invoke-RecordedXMake -Arguments @('run', 'consumer-smoke')
     if ($Platform -eq 'windows') { Invoke-RecordedCliTests }
     Invoke-RecordedXMake -Arguments @('build', '-y', 'stfc-profiles-community-mod-adapter')

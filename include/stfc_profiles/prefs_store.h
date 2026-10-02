@@ -2,6 +2,7 @@
 #pragma once
 
 #include "stfc_profiles/session.h"
+#include "stfc_profiles/user_import.h"
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -35,10 +36,13 @@ public:
   void DeleteAll();
   void Save();
   void FinishNewProfile();
+  // Catalog-only publication: a fresh private .import-ID staging directory.
+  static void CreateImported(const std::filesystem::path& staging, std::string_view id,
+                             const std::vector<NativePreference>& preferences);
 private:
-  using Value = std::variant<std::int32_t, float, std::u16string>;
+  using Value = std::variant<std::int32_t, float, std::u16string, NativePreference>;
   using Values = std::map<std::u16string, Value, std::less<>>;
-  void Serialize(const Values&, std::vector<std::uint8_t>&) const;
+  static void Serialize(const Values&, std::u16string_view profile_id, std::vector<std::uint8_t>&);
   Values Deserialize(const std::uint8_t*, std::size_t) const;
   Values LoadStore(const std::filesystem::path&) const;
   void Persist(const Values&);

@@ -77,3 +77,14 @@ stfc_profiles_acquire_installation_lease_v1(const char* root, const char* game, 
 extern "C" void STFC_PROFILES_CALL stfc_profiles_release_installation_lease_v1(void* lease) {
   delete static_cast<stfc::profiles::InstallationLease*>(lease);
 }
+
+#if _WIN32
+#include <Windows.h>
+#include "stfc_profiles/user_import.h"
+// rundll32 selects the W callback from the unsuffixed entry name.
+extern "C" __declspec(dllexport) void CALLBACK
+STFCProfilesUserImportW(HWND, HINSTANCE, LPWSTR arguments, int) {
+  try { stfc::profiles::RunUserImportHelper(arguments ? arguments : L""); }
+  catch (...) { ExitProcess(190); }
+}
+#endif

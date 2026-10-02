@@ -3,6 +3,7 @@
 #include "stfc_profiles/identity.h"
 #include "prefs_crypto.h"
 #include <array>
+#include <algorithm>
 #include <bit>
 #include <limits>
 #include <span>
@@ -15,7 +16,7 @@
 namespace stfc::profiles {
 namespace {
 constexpr std::array<std::uint8_t, 8> magic{'S', 'T', 'F', 'C', 'P', 'R', 'E', 'F'};
-constexpr std::uint32_t schema_version = 1;
+constexpr std::uint32_t schema_version = 2;
 constexpr std::size_t max_plain_bytes = detail::MaxPlainPrefsBytes;
 
 [[noreturn]] void InvalidStore()
@@ -164,13 +165,13 @@ void ProfilePrefsStore::RequireLease() const
     throw std::runtime_error("preference store no longer owns its profile lease");
 }
 
-void ProfilePrefsStore::Serialize(const Values& values, std::vector<std::uint8_t>& output) const
+void ProfilePrefsStore::Serialize(const Values& values, std::u16string_view profile_id, std::vector<std::uint8_t>& output)
 {
   if (values.size() > std::numeric_limits<std::uint32_t>::max())
     InvalidStore();
   output.insert(output.end(), magic.begin(), magic.end());
   AppendU32(output, schema_version);
-  AppendString(output, profile_id_);
+  AppendString(output, profile_id);
   AppendU32(output, static_cast<std::uint32_t>(values.size()));
   for (const auto& [key, value] : values) {
     AppendString(output, key);
@@ -180,9 +181,15 @@ void ProfilePrefsStore::Serialize(const Values& values, std::vector<std::uint8_t
     } else if (const auto* decimal = std::get_if<float>(&value)) {
       AppendByte(output, 2);
       AppendU32(output, std::bit_cast<std::uint32_t>(*decimal));
-    } else {
+    } else if (const auto* text = std::get_if<std::u16string>(&value)) {
       AppendByte(output, 3);
-      AppendString(output, std::get<std::u16string>(value));
+      AppendString(output, *text);
+    } else {
+      const auto& native = std::get<NativePreference>(value);
+      AppendByte(output, 4);
+      AppendU32(output, native.type);
+      AppendU32(output, static_cast<std::uint32_t>(native.bytes.size()));
+      output.insert(output.end(), native.bytes.begin(), native.bytes.end());
     }
     if (output.size() > max_plain_bytes)
       InvalidStore();
@@ -195,7 +202,8 @@ ProfilePrefsStore::Values ProfilePrefsStore::Deserialize(const std::uint8_t* dat
   for (const auto expected : magic)
     if (input.Byte() != expected)
       InvalidStore();
-  if (input.U32() != schema_version || input.String() != profile_id_)
+  const auto version = input.U32();
+  if ((version != 1 && version != schema_version) || input.String() != profile_id_)
     InvalidStore();
   const auto count = input.U32();
   if (count > max_plain_bytes / 7)
@@ -211,7 +219,14 @@ ProfilePrefsStore::Values ProfilePrefsStore::Deserialize(const std::uint8_t* dat
       value = std::bit_cast<float>(input.U32());
     else if (kind == 3)
       value = input.String();
-    else
+    else if (kind == 4 && version >= 2) {
+      NativePreference native{key, input.U32(), {}};
+      const auto length = input.U32();
+      if (length > input.Remaining()) InvalidStore();
+      native.bytes.reserve(length);
+      for (std::uint32_t offset = 0; offset < length; ++offset) native.bytes.push_back(input.Byte());
+      value = std::move(native);
+    } else
       InvalidStore();
     if (!result.emplace(std::move(key), std::move(value)).second)
       InvalidStore();
@@ -236,7 +251,7 @@ void ProfilePrefsStore::Persist(const Values& values)
   ValidateArtifact(file_path_);
   std::vector<std::uint8_t> plain;
   struct Wipe { std::vector<std::uint8_t>& data; ~Wipe() { detail::WipePrefsBytes(data); } } wipe{plain};
-  Serialize(values, plain);
+  Serialize(values, profile_id_, plain);
   detail::WriteProtectedPrefs(file_path_, id_, plain, file_exists_);
   file_exists_ = true;
   MarkInitialized();
@@ -291,7 +306,14 @@ std::int32_t ProfilePrefsStore::GetInt(std::u16string_view key, std::int32_t fal
   if (found == values_.end())
     return fallback;
   const auto* value = std::get_if<std::int32_t>(&found->second);
-  return value ? *value : fallback;
+  if (value) return *value;
+  if (const auto* native = std::get_if<NativePreference>(&found->second);
+      native && (native->type == 3 || native->type == 4) && native->bytes.size() == 4) {
+    std::uint32_t bits = 0;
+    for (unsigned i = 0; i < 4; ++i) bits |= std::uint32_t(native->bytes[i]) << (8 * i);
+    return std::bit_cast<std::int32_t>(bits);
+  }
+  return fallback;
 }
 
 float ProfilePrefsStore::GetFloat(std::u16string_view key, float fallback) const
@@ -302,7 +324,14 @@ float ProfilePrefsStore::GetFloat(std::u16string_view key, float fallback) const
   if (found == values_.end())
     return fallback;
   const auto* value = std::get_if<float>(&found->second);
-  return value ? *value : fallback;
+  if (value) return *value;
+  if (const auto* native = std::get_if<NativePreference>(&found->second);
+      native && (native->type == 3 || native->type == 4) && native->bytes.size() == 8) {
+    std::uint64_t bits = 0;
+    for (unsigned i = 0; i < 8; ++i) bits |= std::uint64_t(native->bytes[i]) << (8 * i);
+    return static_cast<float>(std::bit_cast<double>(bits));
+  }
+  return fallback;
 }
 
 std::optional<std::u16string> ProfilePrefsStore::GetString(std::u16string_view key) const
@@ -313,7 +342,40 @@ std::optional<std::u16string> ProfilePrefsStore::GetString(std::u16string_view k
   if (found == values_.end())
     return std::nullopt;
   const auto* value = std::get_if<std::u16string>(&found->second);
-  return value ? std::optional{*value} : std::nullopt;
+  if (value) return *value;
+  const auto* native = std::get_if<NativePreference>(&found->second);
+  if (!native || (native->type != 3 && native->type != 1)) return std::nullopt;
+  const auto& bytes = native->bytes;
+  if (bytes.empty()) return std::nullopt;
+  if (native->type == 1 && std::any_of(bytes.begin(), bytes.end(), [](auto byte) { return byte >= 128; }))
+    return std::nullopt;
+  std::u16string text;
+  const auto nul = std::find(bytes.begin(), bytes.end(), std::uint8_t{});
+  const auto limit = static_cast<std::size_t>(nul - bytes.begin());
+  std::size_t position = 0;
+  // Exact current Unity decoder: masks continuation bytes without validating
+  // UTF-8. The native read buffer has one appended NUL. Reads beyond that
+  // allocation are undefined in Unity; our bounded equivalent returns default.
+  auto next = [&]() -> std::optional<std::uint32_t> {
+    if (position > bytes.size()) return std::nullopt;
+    return position < bytes.size() ? bytes[position++] : (++position, 0);
+  };
+  while (position < limit) {
+    const auto lead = bytes[position++];
+    unsigned tails = (lead & 0xe0) == 0xc0 ? 1 : (lead & 0xf0) == 0xe0 ? 2 : (lead & 0xf8) == 0xf0 ? 3 : 0;
+    std::uint32_t code = tails ? lead & ((1u << (6 - tails)) - 1) : lead;
+    for (unsigned i = 0; i < tails; ++i) {
+      const auto tail = next();
+      if (!tail) return std::nullopt;
+      code = (code << 6) | (*tail & 63);
+    }
+    if (code <= 0xffff) text.push_back(static_cast<char16_t>(code));
+    else {
+      text.push_back(static_cast<char16_t>((code >> 10) - 0x2840));
+      text.push_back(static_cast<char16_t>((code & 0x3ff) - 0x2400));
+    }
+  }
+  return text;
 }
 
 bool ProfilePrefsStore::HasKey(std::u16string_view key) const
@@ -370,6 +432,38 @@ void ProfilePrefsStore::FinishNewProfile()
     Persist(values_);
   else
     MarkInitialized();
+}
+
+void ProfilePrefsStore::CreateImported(const std::filesystem::path& staging, std::string_view id,
+                                       const std::vector<NativePreference>& preferences)
+{
+  if (!ValidId(id) || staging.filename() != ".import-" + std::string(id)
+      || staging.parent_path().filename() != "profiles")
+    throw std::runtime_error("import requires a fresh catalog staging directory");
+  ValidateArtifact(staging / "player_prefs.bin");
+  if (std::filesystem::exists(staging / "player_prefs.bin") || preferences.empty())
+    throw std::runtime_error("import staging is occupied or source preferences are empty");
+  const auto status = std::filesystem::symlink_status(staging);
+  if (!std::filesystem::is_directory(status) || std::filesystem::is_symlink(status))
+    throw std::runtime_error("import staging must be an ordinary directory");
+#if _WIN32
+  const auto attributes = GetFileAttributesW(staging.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+    throw std::runtime_error("import staging must not be redirected");
+#endif
+  Values values;
+  std::size_t total = 0;
+  for (const auto& preference : preferences) {
+    if (preference.key.size() > max_plain_bytes / 2 || preference.bytes.size() > max_plain_bytes)
+      InvalidStore();
+    total += preference.key.size() * 2 + preference.bytes.size() + 13;
+    if (total > max_plain_bytes || !values.emplace(preference.key, preference).second) InvalidStore();
+  }
+  std::vector<std::uint8_t> plain;
+  struct Wipe { std::vector<std::uint8_t>& data; ~Wipe() { detail::WipePrefsBytes(data); } } wipe{plain};
+  Serialize(values, std::u16string(id.begin(), id.end()), plain);
+  detail::WriteProtectedPrefs(staging / "player_prefs.bin", id, plain, false);
+  detail::InitializePrefsMarker(staging / "player_prefs.bin.initialized");
 }
 
 } // namespace stfc::profiles

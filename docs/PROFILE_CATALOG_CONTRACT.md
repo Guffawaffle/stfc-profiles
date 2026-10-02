@@ -144,9 +144,47 @@ and protection follow the same identity/lifecycle contract and need qualificatio
 
 Accepted UX direction, 2026-10-02. Import is selected by source OS user, not by
 commander. Two Windows users may hold the same game account and still be separate
-import sources with separate destination profile IDs. The import operation,
-preference conversion and final access/transfer design remain unimplemented and
-under study; this section records the accepted explanation requirement.
+import sources with separate destination profile IDs. Windows development source
+implements this operation in the shared owner. Live account portability and
+standard-user credential/UAC qualification remain distinct checks.
+
+`import-sources` enumerates Windows ProfileList users and reports the destination
+user. `prepare-user-import` validates the source SID, new display name and preferred
+installation, then reports the actual read-access requirement. `import-user`
+requires the reviewed destination SID and explicit elevation consent. Neither
+planning nor discovery reads account values into the public JSON response.
+
+The capture reads only the selected user's STFC preference subtree. Loaded hives
+use two matching, timestamp-checked raw registry observations; close that user's
+game first to finish saving. Unloaded hives are opened read-only, parsed in memory
+and rejected if dirty, corrupt, changing or unsupported. They are never mounted,
+recovered or copied to disk. This observes a settled preference store, not a game
+transaction or proof of a usable logged-in account.
+
+Unity hashed names are validated against signed UTF-8 bytes, with Windows ANSI
+name conversion reproduced before the hash is removed. Only hashed Unity entries
+belong to this import; unrelated registry metadata is not interpreted. Numeric,
+binary and otherwise unrecognized value types are retained. In particular, Unity
+stores floats as eight-byte doubles even under REG_DWORD; typed registry readers
+that truncate these values must not be used. The protected schema 2 stores native
+representations alongside normal typed writes. Existing schema 1 stores remain
+readable. Native getter behavior follows current client 270 UnityPlayer; an invalid
+string that would make Unity read beyond its allocation returns the default safely.
+
+Administrator approval starts the exact Profiles CLI or native module's capture
+helper through Windows. A private local pipe binds both process IDs and transfers
+only captured preferences in memory. The helper never receives a destination path
+and never writes profile data. The original process encrypts under the original
+Windows user and fresh immutable ID, stages complete preferences and initialized
+metadata, then publishes the new catalog directory. Capture or write failures
+before publication and declined approval publish no profile. If the process is
+interrupted after publication, the committed catalog directory remains the
+record of the completed import and must be inspected before repeating it. Source state, other profiles and the launch selection remain unchanged.
+Personal browser directories are not copied; named sign-in remains isolated.
+
+Windows user import is explicitly unavailable on macOS until its native source
+and permission design is implemented and qualified; the existing Mac storage and
+runtime contracts remain first-class work.
 
 Determine the selected source's access requirements before requesting elevation.
 Current-user import should use ordinary read access when available. Another
