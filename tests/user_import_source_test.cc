@@ -214,6 +214,26 @@ void DiscoveryDoesNotDecodeCredentials() {
   Fixture missing; missing.Finish("li",true);
   Reject([&]{RegistryHiveHasPreferences(missing.bytes);},"source_missing");
 }
+void DiscoveryPreservesOriginalUserMatches() {
+  const std::string owner="S-1-5-21-1-2-3-1001", other="S-1-5-21-1-2-3-1002";
+  ImportUserDiscovery original{{{owner,"Original user",{},true}},true,0};
+  const nlohmann::json elevated{{"ok",true},{"users",nlohmann::json::array({
+      {{"sid",other},{"name","Other user"},{"currentUser",true}}})},
+      {"requiresElevation",true},{"unavailableUsers",0}};
+  const auto merged=MergeImportDiscoveryResponse(original,elevated,owner);
+  Check(merged.users.size()==2 && merged.users[0].sid==owner && merged.users[0].current_user &&
+      merged.users[1].sid==other && !merged.users[1].current_user,
+      "alternate administrator discovery discarded the original user's readable source");
+  auto duplicate=elevated;
+  duplicate["users"].push_back({{"sid",owner},{"name","Helper's name"}});
+  const auto unioned=MergeImportDiscoveryResponse(original,duplicate,owner);
+  Check(unioned.users.size()==2 && unioned.users[0].name=="Original user",
+      "helper discovery replaced or duplicated an already readable source");
+  duplicate["users"].push_back(duplicate["users"][0]);
+  Reject([&]{MergeImportDiscoveryResponse(original,duplicate,owner);},"import_transfer");
+  auto credentials=elevated;credentials["values"]=nlohmann::json::array();
+  Reject([&]{MergeImportDiscoveryResponse(original,credentials,owner);},"import_transfer");
+}
 void RejectDirtyAndMalformed() {
   Fixture f;f.Value(NativeName(Hashed("foo")),REG_DWORD,{1,0,0,0},true);f.Finish("ri");
   auto bad=f.bytes;Put32(bad,8,8);Reject([&]{ReadRegistryHivePreferences(bad);});
@@ -234,4 +254,4 @@ void RejectDirtyAndMalformed() {
   Fixture duplicate;duplicate.Value(NativeName(Hashed("foo")),REG_DWORD,{1,0,0,0},true);duplicate.values.push_back(duplicate.values[0]);duplicate.Finish();Reject([&]{ReadRegistryHivePreferences(duplicate.bytes);});
 }
 }
-int main(){try{AllListKindsAndRawTypes();UnicodeAndHash();BigDataAndBounds();RejectDirtyAndMalformed();DiscoveryDoesNotDecodeCredentials();InvalidUserSelection();LoadedRegistryLinks();std::cout<<"PASS: synthetic Windows import source fixtures\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{AllListKindsAndRawTypes();UnicodeAndHash();BigDataAndBounds();RejectDirtyAndMalformed();DiscoveryDoesNotDecodeCredentials();DiscoveryPreservesOriginalUserMatches();InvalidUserSelection();LoadedRegistryLinks();std::cout<<"PASS: synthetic Windows import source fixtures\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

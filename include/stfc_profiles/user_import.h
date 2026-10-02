@@ -41,6 +41,8 @@ ImportUser CurrentImportUser();
 std::vector<ImportUser> ImportUsers(bool* requires_elevation = nullptr, std::size_t* unavailable_users = nullptr);
 ImportUserDiscovery DiscoverImportUsers(std::string_view destination_sid);
 ImportUserDiscovery DiscoverImportSources(bool allow_elevation);
+ImportUserDiscovery MergeImportDiscoveryResponse(ImportUserDiscovery original,
+    const nlohmann::json& response, std::string_view destination_sid);
 ImportUser ResolveImportUser(std::string_view sid);
 // Throws CatalogError(elevation_required) only for an actual access denial.
 void CheckImportAccess(const ImportUser& user);

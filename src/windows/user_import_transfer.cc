@@ -196,24 +196,37 @@ ImportUserDiscovery DiscoverImportSources(bool allow_elevation) {
   const auto sid = CurrentUserSid();
   auto result = DiscoverImportUsers(sid);
   if (!result.requires_elevation || !allow_elevation) return result;
-  const auto response = ElevatedRequest({{"operation","discover-users"},{"destinationUserSid",sid}});
+  return MergeImportDiscoveryResponse(std::move(result),
+      ElevatedRequest({{"operation","discover-users"},{"destinationUserSid",sid}}), sid);
+}
+ImportUserDiscovery MergeImportDiscoveryResponse(ImportUserDiscovery result, const Json& response,
+                                                std::string_view destination_sid) {
+  ValidateImportUserSid(destination_sid);
   if (!response.value("ok",false))
     throw CatalogError(response.value("code","import_failed"),response.value("message","Windows user discovery could not finish."));
   const auto& users = response.at("users");
   if (response.contains("values") || !users.is_array() || users.size() > 10000) Fail("import_transfer", "The user discovery response is invalid.");
-  result.users.clear();
+  std::vector<ImportUser> elevated_users;
   for (const auto& entry : users) {
     const auto source = entry.at("sid").get<std::string>();
     ValidateImportUserSid(source);
     const auto name = entry.at("name").get<std::string>();
-    if (name.empty() || name.size() > 32768 || std::any_of(result.users.begin(),result.users.end(),
+    if (name.empty() || name.size() > 32768 || std::any_of(elevated_users.begin(),elevated_users.end(),
         [&](const auto& user) { return user.sid == source; }))
       Fail("import_transfer", "The user discovery response is invalid.");
-    result.users.push_back({source,name,{},source == sid});
+    elevated_users.push_back({source,name,{},source == destination_sid});
   }
   result.requires_elevation = response.at("requiresElevation").get<bool>();
   result.unavailable_users = response.at("unavailableUsers").get<std::size_t>();
   if (result.unavailable_users > 10000) Fail("import_transfer", "The user discovery response is invalid.");
+  // Alternate administrator credentials can have different read access. Retain
+  // sources already found by the original user and add validated helper matches.
+  for (auto& user : elevated_users) {
+    if (std::none_of(result.users.begin(), result.users.end(),
+        [&](const auto& existing) { return existing.sid == user.sid; }))
+      result.users.push_back(std::move(user));
+  }
+  for (auto& user : result.users) user.current_user = user.sid == destination_sid;
   return result;
 }
 void RunUserImportHelper(std::wstring_view command_line) {
