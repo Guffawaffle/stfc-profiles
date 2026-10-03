@@ -96,6 +96,39 @@ try {
     Invoke-ProfileCli -CliArguments @('delete', '--profile', $profileId, '--archived', '--permanent') | Out-Null
     $empty = Invoke-ProfileCli -CliArguments @('list', '--archived')
     if ($empty.profiles.Count -ne 0) { throw 'Explicit permanent deletion retained an archived catalog entry.' }
+    $missingDefault = Invoke-ProfileCli -CliArguments @('resolve-default') -ExpectedSuccess $false
+    if ($missingDefault.error.code -ne 'default_missing') { throw 'Default resolution silently created state.' }
+    $windowsSetup = Invoke-ProfileCli -CliArguments @('default')
+    $defaultId = $windowsSetup.profile.id
+    if ($windowsSetup.apiVersion -ne 2 -or $windowsSetup.profile.kind -ne 'windows-user' -or -not $windowsSetup.profile.ownerUserId) { throw 'CLI Default is not a typed current-user descriptor.' }
+    $sameSetup = Invoke-ProfileCli -CliArguments @('default')
+    if ($sameSetup.profile.id -ne $defaultId) { throw 'CLI Default identity changed after reopen.' }
+    Invoke-ProfileCli -CliArguments @('launch', '--profile', 'default') -ExpectedSuccess $false | Out-Null
+    Invoke-ProfileCli -CliArguments @('archive', '--profile', 'default') -ExpectedSuccess $false | Out-Null
+    $defaultShortcut = Join-Path $fixtureAbsolute 'Default.lnk'
+    Invoke-ProfileCli -CliArguments @('shortcut', '--profile', 'default', '--output', $defaultShortcut) | Out-Null
+    if (-not $shell.CreateShortcut($defaultShortcut).Arguments.Contains($defaultId) -or $shell.CreateShortcut($defaultShortcut).Arguments.Contains('--profile "default"')) { throw 'Default shortcut uses a mutable alias rather than the immutable ID.' }
+    $descriptorFiles = @(Get-ChildItem -LiteralPath (Join-Path $fixtureAbsolute "profiles/$defaultId"))
+    if ($descriptorFiles.Count -ne 1 -or $descriptorFiles[0].Name -ne 'metadata.json') { throw 'Default created isolated state.' }
+    $syntheticGame = Join-Path $fixtureAbsolute 'registered-cli-game'
+    New-Item -ItemType Directory -Path (Join-Path $syntheticGame 'prime_Data') -Force | Out-Null
+    foreach ($leaf in @('prime.exe','GameAssembly.dll','UnityPlayer.dll')) { [IO.File]::WriteAllText((Join-Path $syntheticGame $leaf),'synthetic') }
+    [IO.File]::WriteAllText((Join-Path $syntheticGame '.version'),"&game=270`n")
+    $registration = Invoke-ProfileCli -CliArguments @('register-installation','CLI game','--game',$syntheticGame)
+    $registrationId = $registration.installation.id
+    $known = Invoke-ProfileCli -CliArguments @('installations')
+    if ($known.installations.Count -ne 1 -or $known.installations[0].id -ne $registrationId) { throw 'CLI installation catalog disagrees with registration.' }
+    $registeredPath = Invoke-ProfileCli -CliArguments @('installation-paths','--installation',$registrationId)
+    if ($registeredPath.installation.state -ne 'available') { throw 'CLI registration is unavailable.' }
+    $bound = Invoke-ProfileCli -CliArguments @('create','Bound','--installation',$registrationId)
+    if ($bound.profile.preferredInstallationId -ne $registrationId) { throw 'CLI create did not bind installation before publication.' }
+    Invoke-ProfileCli -CliArguments @('edit','--profile','default','--installation',$registrationId) | Out-Null
+    Invoke-ProfileCli -CliArguments @('game','status','--profile','default') | Out-Null
+    Invoke-ProfileCli -CliArguments @('game','status','--installation',$registrationId) | Out-Null
+    Rename-Item -LiteralPath $syntheticGame -NewName 'moved-cli-game'
+    $staleRegistration = Invoke-ProfileCli -CliArguments @('installation-paths','--installation',$registrationId)
+    if ($staleRegistration.installation.state -ne 'unknown') { throw 'CLI silently repaired a moved installation.' }
+    Invoke-ProfileCli -CliArguments @('game','status','--profile','default') -ExpectedSuccess $false | Out-Null
     'profile CLI and native shortcut tests passed'
 } finally {
     $resolvedFixture = [IO.Path]::GetFullPath($fixtureAbsolute)

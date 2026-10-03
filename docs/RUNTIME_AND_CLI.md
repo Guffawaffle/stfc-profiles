@@ -8,9 +8,14 @@ native Mac qualification remain required before player support is claimed.
 ## CLI
 
 ```text
+stfc-profiles default [--json]
+stfc-profiles resolve-default [--json]
+stfc-profiles installations [--json]
+stfc-profiles register-installation "Primary" --game <directory>
+stfc-profiles installation-paths --installation <id>
 stfc-profiles list
 stfc-profiles list --archived
-stfc-profiles create "Science" [--game <directory>]
+stfc-profiles create "Science" [--game <directory> | --installation <id>]
 stfc-profiles users [--json] [--approve-elevation]
 stfc-profiles import "Main" --user <Windows-SID> [--game <directory>]
 stfc-profiles import "Main" --user <Windows-SID> [--game <directory>] --approve-elevation
@@ -28,6 +33,20 @@ stfc-profiles game check [--game <directory> | --profile <id>]
 stfc-profiles game update [--game <directory> | --profile <id>] [--expected-version <number>]
 stfc-profiles game recover [--game <directory> | --profile <id>]
 ```
+
+`default` ensures the catalog-owned Windows setup descriptor without copying
+account data. `resolve-default` only resolves its existing immutable ID. The
+human CLI alias `--profile default` resolves that ID; shortcuts embed the resolved
+ID. `launch` dispatches by kind: Default starts ordinary `prime.exe`, while
+isolated profiles keep their explicit runtime readiness checks. The CLI uses
+JSON API 2; the C allocation ABI remains unchanged. Default has no owned config,
+browser, log or protected preference files and cannot be archived or deleted.
+
+`--installation <id>` selects a physical registration for launch, shortcut and
+game commands, or saves it during create/edit/import. Alias registration does
+not overwrite a friendly label. Missing, moved or replaced folders stay unknown;
+selection does not repair them. Registration/Default Windows behavior is native
+source work; macOS equivalents remain explicit qualification work.
 
 `--json` returns the versioned shared response; failures return a nonzero exit
 code and structured error. `--root <directory>` explicitly selects disposable or
@@ -76,7 +95,7 @@ for exact source, transaction and recovery boundaries.
 
 ## Protected preferences
 
-The catalog root is independent of the game installation. Account preferences,
+The catalog root is independent of the game installation. Isolated account preferences,
 initialization and recovery files live in the active/archived immutable-ID
 folder. The stable writer and browser lock namespaces stay outside that movable
 folder. Plaintext metadata contains display/launch information, never account

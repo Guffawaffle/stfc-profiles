@@ -16,6 +16,7 @@
 extern "C" {
 #endif
 
+// The stable v1 allocation ABI accepts JSON apiVersion 1 or typed apiVersion 2.
 // Returns zero when a response was allocated, including structured operation
 // failures. A nonzero return denotes an ABI/input/allocation failure. The caller
 // frees every returned response using this module's matching allocator.

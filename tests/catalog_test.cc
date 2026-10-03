@@ -1,4 +1,5 @@
 #include "stfc_profiles/catalog.h"
+#include "stfc_profiles/identity.h"
 #include "stfc_profiles/prefs_store.h"
 #include "stfc_profiles/session.h"
 #if __APPLE__
@@ -6,6 +7,7 @@
 #endif
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -55,7 +57,7 @@ struct Fixture {
   }
   std::string RootText() const { const auto bytes=root.u8string();return {bytes.begin(),bytes.end()}; }
   Json Call(Json request) {
-    request["apiVersion"]=1;request["root"]=RootText();
+    if (!request.contains("apiVersion")) request["apiVersion"]=1;request["root"]=RootText();
     return Json::parse(ExecuteCatalogRequest(request.dump()));
   }
   Json Create(const char* name) {
@@ -89,6 +91,176 @@ void CatalogLocationIsReadOnly()
   const auto rejected=f.Call({{"operation","catalog-location"}});
   Check(!rejected.value("ok",false)&&fs::is_empty(f.root),"read-only location request published catalog state");
 }
+#if _WIN32
+void NativeApiProjectsTypedDefault()
+{
+  Fixture f;wchar_t executable[32768]{};
+  Check(GetModuleFileNameW(nullptr,executable,32768)>0,"native API fixture path unavailable");
+  const auto module=LoadLibraryExW((fs::path(executable).parent_path()/"stfc-profiles-native.dll").c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
+  Check(module!=nullptr,"native catalog API unavailable");
+  struct Unload { HMODULE module; ~Unload(){ FreeLibrary(module); } } unload{module};
+  using Request=int(__cdecl*)(const char*,char**);using Free=void(__cdecl*)(void*);
+  const auto call=reinterpret_cast<Request>(GetProcAddress(module,"stfc_profiles_catalog_request_v1"));
+  const auto release=reinterpret_cast<Free>(GetProcAddress(module,"stfc_profiles_free_v1"));
+  Check(call && release,"stable catalog allocation ABI is missing");
+  const auto request=Json{{"apiVersion",2},{"operation","ensure-default"},{"root",f.RootText()}}.dump();
+  char* output=nullptr;Check(call(request.c_str(),&output)==0 && output,"native typed request failed allocation");
+  struct Release { char* output; Free release; ~Release(){release(output);} } allocation{output,release};
+  const auto response=Json::parse(output);
+  Check(response.at("apiVersion")==2 && response.value("ok",false) && response.at("profile").at("kind")=="windows-user",response.dump());
+  Check(f.Call({{"apiVersion",2},{"operation","resolve-default"}}).at("profile")==response.at("profile"),"native ABI and direct core disagree on shared Default identity");
+}
+void MakeSyntheticInstallation(const fs::path& directory)
+{
+  fs::create_directory(directory);fs::create_directory(directory/"prime_Data");
+  for (const auto* file:{"prime.exe","GameAssembly.dll","UnityPlayer.dll"}) std::ofstream(directory/file)<<"synthetic";
+  std::ofstream(directory/".version")<<"&game=270\n";
+}
+void InstallationRegistrationsBindPhysicalDirectories()
+{
+  Fixture f;const auto game=f.root/"registered-game";MakeSyntheticInstallation(game);
+  auto registered=f.Call({{"apiVersion",2},{"operation","register-installation"},{"name","Primary"},{"gameDirectory",game.string()}});
+  Check(registered.value("ok",false) && registered.at("created")==true,registered.dump());
+  const auto installation=registered.at("installation");const auto id=installation.at("id").get<std::string>();
+  Check(ValidId(id) && installation.at("state")=="available" && installation.at("physicalIdentity").get<std::string>().size()==64,"installation lacks stable physical binding");
+  auto alias=(game/"..").lexically_normal()/game.filename();
+  auto alias_name=alias.wstring();for (auto& ch:alias_name) ch=std::towupper(ch);
+  const auto same=f.Call({{"apiVersion",2},{"operation","register-installation"},{"name","Different label"},{"gameDirectory",fs::path(alias_name).string()}});
+  Check(same.value("ok",false) && same.at("created")==false && same.at("installation")==installation,"alias registration duplicated or retargeted original installation");
+  const auto newer=f.Call({{"apiVersion",2},{"operation","create"},{"name","Bound account"},{"preferredInstallationId",id}});
+  Check(newer.value("ok",false),newer.dump());
+  auto account=newer.at("profile");const auto account_id=account.at("id").get<std::string>();
+  Check(account.at("preferredInstallationId")==id && account.at("gameDirectory")==installation.at("gameDirectory"),"create did not atomically bind preferred registration");
+  auto setup=f.Call({{"apiVersion",2},{"operation","ensure-default"}}).at("profile");
+  const auto setup_id=setup.at("id").get<std::string>();
+  const auto edit=f.Call({{"apiVersion",2},{"operation","edit"},{"id",setup_id},{"preferredInstallationId",id},{"expectedRevision",setup.at("revision")}});
+  Check(edit.value("ok",false) && edit.at("profile").at("preferredInstallationId")==id,"Default could not bind selected registration");
+  setup=edit.at("profile");
+  const auto other=f.root/"different-game";MakeSyntheticInstallation(other);
+  const auto mismatch=f.Call({{"apiVersion",2},{"operation","create"},{"name","No partial account"},{"preferredInstallationId",id},{"gameDirectory",other.string()}});
+  Check(!mismatch.value("ok",false) && mismatch.at("error").at("code")=="installation_changed","contradictory registration/path published profile");
+  const auto clear=f.Call({{"apiVersion",2},{"operation","edit"},{"id",setup_id},{"preferredInstallationId",""},{"gameDirectory",other.string()},{"expectedRevision",setup.at("revision")}});
+  Check(clear.value("ok",false) && clear.at("profile").at("preferredInstallationId")==""
+      && fs::u8path(clear.at("profile").at("gameDirectory").get<std::string>())==fs::canonical(other),"explicit clear-binding/path edit ignored the new path");
+  const auto rebound=f.Call({{"apiVersion",2},{"operation","edit"},{"id",setup_id},{"preferredInstallationId",id},{"expectedRevision",clear.at("profile").at("revision")}});
+  Check(rebound.value("ok",false),rebound.dump());setup=rebound.at("profile");
+  const auto moved=f.root/"moved-game";fs::rename(game,moved);
+  const auto stale=f.Call({{"apiVersion",2},{"operation","installation-paths"},{"installationId",id}});
+  Check(stale.value("ok",false) && stale.at("installation").at("state")=="unknown" && stale.at("installation").at("gameDirectory")==installation.at("gameDirectory"),"missing installation silently changed registration");
+  const auto moved_registration=f.Call({{"apiVersion",2},{"operation","register-installation"},{"name","Moved"},{"gameDirectory",moved.string()}});
+  Check(!moved_registration.value("ok",false) && moved_registration.at("error").at("code")=="installation_unknown","registration silently relocated a saved installation");
+  MakeSyntheticInstallation(game);
+  const auto replaced=f.Call({{"apiVersion",2},{"operation","installation-paths"},{"installationId",id}});
+  Check(replaced.value("ok",false) && replaced.at("installation").at("state")=="unknown","new folder at old path passed physical binding");
+  const auto launch=f.Call({{"apiVersion",2},{"operation","launch-ordinary"},{"id",setup_id}});
+  Check(!launch.value("ok",false) && launch.at("error").at("code")=="installation_changed","ordinary launch used a replacement installation");
+  const auto isolated_launch=f.Call({{"apiVersion",2},{"operation","launch"},{"id",account_id}});
+  Check(!isolated_launch.value("ok",false) && isolated_launch.at("error").at("code")=="installation_changed","isolated launch used a replacement installation");
+  const auto select=f.Call({{"apiVersion",2},{"operation","edit"},{"id",setup_id},{"preferredInstallationId",id},{"expectedRevision",setup.at("revision")}});
+  Check(!select.value("ok",false),"selection accepted a stale registration");
+  const auto new_registration=f.Call({{"apiVersion",2},{"operation","register-installation"},{"name","Replacement"},{"gameDirectory",game.string()}});
+  Check(new_registration.value("ok",false) && new_registration.at("installation").at("id")!=id,"explicit replacement did not receive a distinct registration ID");
+  const auto listed=f.Call({{"apiVersion",2},{"operation","installations"}});
+  Check(listed.at("installations").size()==2 && listed.at("issues").empty(),"registrations did not retain unknown original alongside deliberate new installation");
+  Check(f.Call({{"apiVersion",2},{"operation","paths"},{"id",setup_id}}).at("profile").at("preferredInstallationId")==id,"replacement retargeted existing profile preference");
+  Check(fs::is_empty(f.root/"sessions"),"registration generated game session authority");
+}
+struct OrdinaryChildren {
+  std::vector<HANDLE> handles;
+  ~OrdinaryChildren() {
+    for (auto process:handles) {
+      if (WaitForSingleObject(process,0)==WAIT_TIMEOUT) TerminateProcess(process,190);
+      WaitForSingleObject(process,5000);CloseHandle(process);
+    }
+  }
+  void Add(const Json& response) {
+    const auto process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE|PROCESS_TERMINATE,FALSE,response.at("processId").get<DWORD>());
+    Check(process!=nullptr,"ordinary synthetic child is not observable");handles.push_back(process);
+  }
+};
+void OrdinaryLaunchDoesNotRequestIsolation()
+{
+  Fixture f;const auto profile=f.Call({{"apiVersion",2},{"operation","ensure-default"}}).at("profile");
+  const auto id=profile.at("id").get<std::string>();
+  const auto game=f.root/"ordinary-game";fs::create_directory(game);
+  wchar_t executable[32768]{};Check(GetModuleFileNameW(nullptr,executable,32768)>0,"fixture executable unavailable");
+  fs::copy_file(executable,game/"prime.exe");
+  OrdinaryChildren children;
+  for (int attempt=0;attempt<2;++attempt) {
+    const auto launch=f.Call({{"apiVersion",2},{"operation","launch-ordinary"},{"id",id},{"gameDirectory",game.string()}});
+    Check(launch.value("ok",false),launch.dump());children.Add(launch);
+    Check(launch.at("readiness")=="ordinary" && !launch.at("started").get<std::string>().empty()
+      && fs::u8path(launch.at("executable").get<std::string>())==fs::canonical(game/"prime.exe"),"ordinary launch omitted exact process snapshot");
+    const auto marker=game/("arguments-"+std::to_string(launch.at("processId").get<DWORD>())+".txt");
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    while (!fs::exists(marker) && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    Check(fs::exists(marker),"ordinary child did not record its command line");
+    std::ifstream stream(marker);std::string text{std::istreambuf_iterator<char>(stream),{}};
+    Check(text.find("-stfc-profile")==std::string::npos && text.find("-logFile")==std::string::npos,"ordinary launch activated isolation or profile log routing");
+  }
+  Check(fs::is_empty(f.root/"sessions"),"ordinary launch published isolated session authority");
+  Check(f.Call({{"apiVersion",2},{"operation","sessions"}}).at("sessions").empty(),"ordinary process falsely reported isolated readiness");
+  Check(f.Call({{"apiVersion",2},{"operation","resolve-default"}}).at("profile")==profile,"ordinary launches changed persistent descriptor");
+  Check(!fs::exists(f.root/".locks"/(id+".lock")) && !fs::exists(f.root/".locks"/(id+".data.lock")),"ordinary launch entered isolated writer/browser exclusion");
+  std::ofstream(game/"ordinary-release")<<"release";
+  for (auto handle:children.handles) Check(WaitForSingleObject(handle,5000)==WAIT_OBJECT_0,"ordinary child failed to stop");
+}
+void DefaultIsTypedMetadataOnly()
+{
+  Fixture f;
+  for (const auto& version: {Json(2.5),Json(4294967298ull)}) {
+    const auto rejected=f.Call({{"apiVersion",version},{"operation","ensure-default"}});
+    Check(!rejected.value("ok",false) && rejected.at("error").at("code")=="api_version","malformed version entered typed catalog API");
+  }
+  const auto isolated=f.Create("Account");
+  const auto isolated_before=fs::file_size(f.root/"profiles"/isolated.at("id").get<std::string>()/"metadata.json");
+  const auto missing=f.Call({{"apiVersion",2},{"operation","resolve-default"}});
+  Check(!missing.value("ok",false) && missing.at("error").at("code")=="default_missing","resolve created a Default descriptor");
+  auto response=f.Call({{"apiVersion",2},{"operation","ensure-default"}});
+  Check(response.value("ok",false) && response.at("apiVersion")==2,response.dump());
+  const auto profile=response.at("profile");const auto id=profile.at("id").get<std::string>();
+  Check(ValidId(id) && profile.at("kind")=="windows-user" && profile.at("name")=="Default"
+      && profile.at("builtIn")==true && !profile.at("ownerUserId").get<std::string>().empty(),"Default lacks typed immutable user identity");
+  Check(!profile.contains("preferencesInitialized") && !profile.contains("configPath") && !profile.contains("logPath"),"Default claims isolated data ownership");
+  Check(profile.at("preferenceScope")=="windows-user" && profile.at("configurationScope")=="installation","Default data scopes are incorrect");
+  Check(std::distance(fs::directory_iterator(f.root/"profiles"/id),fs::directory_iterator{})==1,"Default created isolated account files");
+  Check(f.Call({{"apiVersion",2},{"operation","ensure-default"}}).at("profile")==profile,"ensure changed persistent Default identity");
+  Check(f.Call({{"apiVersion",2},{"operation","resolve-default"}}).at("profile")==profile,"resolve disagrees with ensure");
+  Check(f.Call({{"operation","list"}}).at("profiles").size()==1,"older client received typed Default as isolated profile");
+  const auto old_direct=f.Call({{"operation","paths"},{"id",id}});
+  Check(!old_direct.value("ok",false) && old_direct.at("error").at("code")=="api_version","older client opened Default as isolated profile");
+  const auto list=f.Call({{"apiVersion",2},{"operation","list"}});
+  Check(list.at("profiles").size()==2 && list.at("issues").empty(),"typed discovery lost existing isolated profile");
+  for (const auto& item:list.at("profiles"))
+    if (item.at("id")==isolated.at("id")) Check(item.at("kind")=="isolated" && item.at("configPath")==isolated.at("configPath"),"existing isolated projection changed ownership");
+  for (const auto* operation:{"archive","rename","delete","launch"}) {
+    const auto denied=f.Call({{"apiVersion",2},{"operation",operation},{"id",id},{"name","Renamed"},{"expectedRevision",profile.at("revision")}});
+    Check(!denied.value("ok",false) && denied.at("error").at("code")=="profile_kind",std::string("Default accepted isolated operation ")+operation);
+  }
+  Throws([&]{ SessionLease access(f.root,id); },"Default acquired an isolated writer lease");
+  Throws([&]{ BrowserLease access(f.root,id); },"Default acquired an isolated browser/data lease");
+  const auto other_launch=f.Call({{"apiVersion",2},{"operation","launch-ordinary"},{"id",isolated.at("id")}});
+  Check(!other_launch.value("ok",false) && other_launch.at("error").at("code")=="profile_kind","ordinary launch bypassed isolated account routing");
+  const auto missing_install=f.Call({{"apiVersion",2},{"operation","launch-ordinary"},{"id",id}});
+  Check(!missing_install.value("ok",false) && missing_install.at("error").at("code")=="installation_required","ordinary launch requires no installation");
+  const auto game=f.root/"synthetic-game";fs::create_directory(game);
+  const auto edited=f.Call({{"apiVersion",2},{"operation","edit"},{"id",id},{"gameDirectory",game.string()},{"expectedRevision",profile.at("revision")}});
+  Check(edited.value("ok",false) && edited.at("profile").at("id")==id,edited.dump());
+  Check(f.Call({{"apiVersion",2},{"operation","ensure-default"}}).at("profile").at("id")==id,"installation change recreated Default");
+  Check(fs::file_size(f.root/"profiles"/isolated.at("id").get<std::string>()/"metadata.json")==isolated_before,"Default changed isolated metadata");
+  Check(fs::is_empty(f.root/"sessions"),"Default published isolated readiness/session state");
+  const auto duplicate=std::string(32,'e');fs::create_directory(f.root/"profiles"/duplicate);
+  fs::copy_file(f.root/"profiles"/id/"metadata.json",f.root/"profiles"/duplicate/"metadata.json");
+  const auto conflict=f.Call({{"apiVersion",2},{"operation","ensure-default"}});
+  Check(!conflict.value("ok",false) && conflict.at("error").at("code")=="duplicate_default","duplicate Default identity accepted");
+  fs::remove_all(f.root/"profiles"/duplicate);
+  auto metadata=Json::parse(std::ifstream(f.root/"profiles"/id/"metadata.json"));
+  metadata["ownerUserId"]="S-1-5-21-0-0-0-1";
+  std::ofstream(f.root/"profiles"/id/"metadata.json",std::ios::trunc)<<metadata.dump();
+  const auto mismatch=f.Call({{"apiVersion",2},{"operation","ensure-default"}});
+  Check(!mismatch.value("ok",false) && mismatch.at("error").at("code")=="invalid_metadata","Default owner mismatch silently replaced identity");
+}
+#endif
 void IdentityRevisionAndConflict()
 {
   Fixture f;const auto first=f.Create("Science");const auto id=first.at("id").get<std::string>();
@@ -249,8 +421,27 @@ int HoldLease(const fs::path& root,const std::string& id)
 int main(int argc,char** argv)
 {
   try {
+#if _WIN32
+    wchar_t test_executable[32768]{};
+    Check(GetModuleFileNameW(nullptr,test_executable,32768)>0,"synthetic process path unavailable");
+    if (fs::path(test_executable).filename()==L"prime.exe") {
+      const auto directory=fs::path(test_executable).parent_path();
+      const auto command=std::wstring(GetCommandLineW());
+      const auto count=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,command.data(),static_cast<int>(command.size()),nullptr,0,nullptr,nullptr);
+      Check(count>0,"synthetic command line conversion failed");std::string text(count,'\0');
+      Check(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,command.data(),static_cast<int>(command.size()),text.data(),count,nullptr,nullptr)==count,"synthetic command line unavailable");
+      std::ofstream(directory/("arguments-"+std::to_string(GetCurrentProcessId())+".txt"))<<text;
+      const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(12);
+      while (!fs::exists(directory/"ordinary-release") && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      return fs::exists(directory/"ordinary-release")?0:190;
+    }
+#endif
     if (argc==4 && std::string_view(argv[1])=="--hold-lease") return HoldLease(fs::u8path(argv[2]),argv[3]);
-    CatalogLocationIsReadOnly();IdentityRevisionAndConflict();IncompleteEntriesAreVisibleFailures();LifecycleRequiresBothWriterAndBrowserInactivity();CrossProcessExclusionAndIdentity();
+    CatalogLocationIsReadOnly();
+#if _WIN32
+    DefaultIsTypedMetadataOnly();NativeApiProjectsTypedDefault();InstallationRegistrationsBindPhysicalDirectories();OrdinaryLaunchDoesNotRequestIsolation();
+#endif
+    IdentityRevisionAndConflict();IncompleteEntriesAreVisibleFailures();LifecycleRequiresBothWriterAndBrowserInactivity();CrossProcessExclusionAndIdentity();
     std::cout<<"profile catalog tests passed\n";return 0;
   } catch (const std::exception& error) { std::cerr<<"profile catalog tests failed: "<<error.what()<<'\n';return 1; }
 }

@@ -29,6 +29,7 @@ for _, entry in ipairs({
         set_exceptions("cxx")
         if is_plat("windows") then
             add_syslinks("uuid")
+            if entry[1] == "catalog-tests" then add_deps("stfc-profiles-native", {inherit = false}) end
             if entry[1] == "stfc-profiles" then
                 add_syslinks("comctl32")
                 add_ldflags("/MANIFEST:EMBED", "/MANIFESTINPUT:" .. path.join(os.scriptdir(), "cli/windows.manifest"), {force = true})

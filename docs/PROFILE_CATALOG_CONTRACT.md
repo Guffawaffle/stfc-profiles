@@ -1,14 +1,15 @@
 # Shared profile catalog and launch contract
 
-Status: accepted product decisions, 2026-09-29. This is the canonical contract
+Status: accepted product decisions, updated 2026-10-02. This is the canonical contract
 for the shared catalog, identity, storage, archive lifecycle and CLI direction.
 It records the accepted target; the implementation gaps below remain open.
 STFC Profiles owns this contract. Bridge and the community mod consume it.
 
 ## Terms and ownership
 
-A **profile** is a saved account identity and its preferences. A **session** is
-a running game process using a profile. Names are presentation; the immutable
+A **profile** is a launch and storage context. Its immutable ID does not fix a
+Scopely login, commander or server permanently. A **session** is a running game
+process using that context. Names are presentation; the immutable
 profile ID connects the catalog, account preferences, runtime exclusion and
 shortcuts. It is generated once at creation and preserved through rename,
 installation changes, archive, restore and backup. It is not an encryption key.
@@ -20,6 +21,88 @@ UI preferences, including its last selected profile; those preferences cannot
 select an account for another launch path. Installation choice is launch
 metadata, separate from account identity. Several profiles may launch the same
 canonical game executable; a preferred installation may be overridden explicitly.
+
+## Typed Default and API versions
+
+The built-in **Default** represents the current Windows user's existing setup.
+It has `kind: windows-user`, one generated immutable ID per user catalog and a
+token-derived `ownerUserId` SID. Its active ID folder contains `metadata.json`
+only. Creating the descriptor never imports, decrypts, copies, initializes or
+redirects PlayerPrefs, browser data or game settings. The descriptor's identity
+is fixed; the ordinary Windows user's live account preferences remain mutable.
+Default configuration belongs to the selected installation's existing TOML.
+
+`ensure-default` creates this descriptor once under the catalog lock;
+`resolve-default` requires an existing descriptor. Conflicting IDs, wrong owners,
+unexpected owned files and interrupted metadata fail explicitly. Default's name
+is fixed; revision-bound `edit` may change its preferred installation. Rename,
+archive, restore, deletion and isolated writer/browser/data leases are rejected.
+Copying a Windows setup creates a new isolated profile and leaves Default alone.
+
+The stable `stfc_profiles_catalog_request_v1` allocation ABI accepts JSON
+`apiVersion: 2` for typed projections. Default uses metadata schema 2, requiring
+`kind`, `ownerUserId` and `name: Default`; it has no protected-store lifecycle.
+Existing isolated metadata stays schema 1 and projects `kind: isolated`. Existing
+IDs, protected files, archives and import provenance are preserved without a
+whole-catalog rewrite. API 1 lists omit Default and direct API 1 access rejects it
+with `api_version`. Older game hosts likewise reject unsupported schema 2 before
+opening isolated storage. API 2 consumers must dispatch by kind rather than infer
+kind from a name, null selection or absent preferences.
+
+Typed profile projections include `id`, `kind`, `builtIn`, `name`, `directory`,
+`revision`, `state`, `gameDirectory`, `preferredInstallationId`, `preferenceScope`
+and `configurationScope`. Default adds `ownerUserId` and omits `configPath`,
+`logPath` and `preferencesInitialized`. Isolated profiles retain those owned paths
+and lifecycle fields. A saved registration also projects `installationState`.
+
+`launch-ordinary` takes a Default ID and an explicit or preferred installation.
+It starts only `prime.exe`, omitting `-stfc-profile`, isolated log arguments and
+the runtime capability probe. It returns PID, process-start identity, executable
+and `readiness: ordinary`; this proves coordinated startup, not isolation or a
+particular logged-in account. It creates no profile session receipt or lifetime
+writer/browser lease. Shared installation access covers preflight and spawn;
+afterward ordinary processes are observed by installation inspection. Direct
+ordinary game launches remain external behavior. `sessions` retains its isolated
+receipt semantics and does not claim ordinary lifetime ownership.
+
+The Windows setup descriptor and native physical installation registration are
+Windows source features. macOS reports explicit unavailability for them pending
+its native design and qualification; existing isolated macOS operations remain.
+
+## Installation registrations
+
+The shared catalog stores installation metadata under
+`installations/<immutable-registration-id>/metadata.json`. This directory catalog
+has no central index. Registration schema 1 contains a friendly name, canonical
+game directory and a SHA-256 representation of its Windows volume/file ID.
+`installations` lists registrations and explicit issues; `register-installation`
+accepts `name` and `gameDirectory`; `installation-paths` resolves `installationId`.
+These operations require JSON API 2 and never write to the game installation.
+
+A valid registration requires the game's executable, Unity/IL2CPP files,
+`prime_Data` and the official `&game=<version>` marker. Labels and registration
+IDs do not establish physical identity. Alias/case spellings reuse the same
+registration and preserve its saved label/path. Missing or replaced physical
+directories remain `state: unknown`; a moved original does not silently repair
+the path, retarget recovery journals or rewrite profile preferences. Explicitly
+registering a different physical installation gives it a different ID.
+Relocation/removal/editing of registrations is not implemented in this slice.
+
+`create`, `prepare-user-import`, `import-user` and profile `edit` may accept
+`preferredInstallationId`; an empty value removes the preference when editing.
+Bound creation/import commits the reference with profile publication. The import
+plan includes `preferredInstallationId` and `installationRevision`; bound import
+requires `expectedInstallationRevision` and revalidates before capture and before
+publication. No partial published profile appears if that binding changes.
+`gameDirectory` remains projected for current consumers. An explicit path edit
+without a registration clears the old reference. A request supplying both a
+registration and a path must identify the same physical directory.
+
+Launch and game maintenance accept explicit `installationId`; otherwise launch
+uses the profile's preferred registration. A stale registration fails before use.
+An explicit path override is a deliberate separate selection, not an automatic
+fallback from an unavailable registration. Canonical installation update locks,
+stopped-process checks and recovery boundaries remain in force.
 
 ## Per-user storage
 
@@ -49,7 +132,7 @@ or Bridge-owned account-profile index. `profiles/<id>` is active;
 validates their metadata; invalid or incomplete entries are reported explicitly.
 An ID present in both locations is a conflict, never permission to overwrite.
 
-Each profile has versioned, plaintext `metadata.json` containing its editable
+Each isolated profile has versioned, plaintext `metadata.json` containing its editable
 display name and optional preferred game installation. The directory name is
 the ID authority. Login tokens and account preferences remain outside metadata
 in the protected preference store. Profile-specific logs and other owned data
@@ -80,7 +163,7 @@ operation, coordinated with launch admission. The exclusion namespace must stay
 stable across directory moves and be keyed by immutable identity; placing the
 only coordination lock inside a movable directory is insufficient.
 
-The runtime holds per-profile writer exclusion for the full session lifetime,
+For isolated profiles, the runtime holds per-profile writer exclusion for the full session lifetime,
 independent of Bridge or the CLI remaining open. Two different profiles may run
 concurrently; two sessions must never write the same profile. The catalog records
 metadata, not a persistent `running` flag. Sessions are discovered from live
@@ -110,8 +193,9 @@ context; packaged hosts must qualify their filesystem declaration separately.
 
 Installing capability does not activate a named profile. Ordinary `prime.exe`
 and official-launcher launches retain ordinary OS-user preferences. GUI selection
-and other profile activity never redirect a bare launch. An explicit profile
-request must isolate the exact requested ID or stop with guidance.
+and other profile activity never redirect a bare launch. An explicit isolated profile
+request must isolate the exact requested ID or stop with guidance. A typed Default
+coordinator request intentionally uses ordinary Windows-user behavior.
 
 On Windows the game-host profile selector is `prime.exe -stfc-profile <id>` using
 separate argument tokens. The coordinator supplies Unity's `-logFile` argument

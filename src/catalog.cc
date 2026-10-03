@@ -161,7 +161,7 @@ fs::path CatalogRoot(const fs::path& requested)
       || (fs::equivalent(requested, shared, identity_error) && !identity_error))
     CheckSharedRoot(root);
 #endif
-  for (const auto* name : {"profiles", "archives", ".locks", "sessions"}) {
+  for (const auto* name : {"profiles", "archives", "installations", ".locks", "sessions"}) {
     fs::create_directories(root / name);
     Plain(root / name, true);
   }
@@ -312,6 +312,152 @@ std::string Game(std::string value)
   if (!path.is_absolute()) Fail("invalid_installation", "Choose an absolute game installation path.");
   return Utf8(fs::weakly_canonical(path));
 }
+std::string OwnerUserId()
+{
+#if _WIN32
+  return CurrentUserSid();
+#else
+  Fail("platform_unavailable", "The Windows-user Default descriptor is available on Windows only.");
+#endif
+}
+bool WindowsUser(const Json& metadata)
+{ return metadata.value("kind", std::string{"isolated"}) == "windows-user"; }
+void Isolated(const Json& metadata)
+{
+  if (WindowsUser(metadata))
+    Fail("profile_kind", "Default uses the existing Windows setup. It cannot enter isolated profile storage or lifecycle operations.");
+}
+struct PhysicalInstallation { fs::path directory; std::string identity; };
+PhysicalInstallation ObserveInstallation(const fs::path& requested)
+{
+#if _WIN32
+  if (!requested.is_absolute()) Fail("invalid_installation", "Choose an absolute game installation path.");
+  const auto handle = CreateFileW(requested.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) Fail("installation_unknown", "The registered installation is missing or cannot be inspected.");
+  struct Close { HANDLE handle; ~Close() { CloseHandle(handle); } } close{handle};
+  FILE_ID_INFO identity{}; FILE_STANDARD_INFO information{};
+  wchar_t path[32768]{};
+  const auto length = GetFinalPathNameByHandleW(handle, path, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!GetFileInformationByHandleEx(handle, FileIdInfo, &identity, sizeof(identity))
+      || !GetFileInformationByHandleEx(handle, FileStandardInfo, &information, sizeof(information))
+      || !information.Directory || !length || length >= 32768)
+    Fail("installation_unknown", "The installation's physical directory identity could not be established.");
+  std::string fingerprint(reinterpret_cast<const char*>(&identity.VolumeSerialNumber), sizeof(identity.VolumeSerialNumber));
+  fingerprint.append(reinterpret_cast<const char*>(identity.FileId.Identifier), sizeof(identity.FileId.Identifier));
+  return {WindowsPathName(fs::path(std::wstring(path,length))), Hash(fingerprint)};
+#else
+  Fail("platform_unavailable", "Installation registration requires qualified native directory identity. Windows is implemented; macOS registration is pending.");
+#endif
+}
+void ValidateInstallationImage(const fs::path& game)
+{
+  Plain(game,true); Plain(game / "prime.exe",false); Plain(game / "GameAssembly.dll",false);
+  Plain(game / "UnityPlayer.dll",false); Plain(game / "prime_Data",true);
+  const auto marker = Read(game / ".version");
+  std::string_view version=marker;
+  while (!version.empty() && (version.back()=='\r' || version.back()=='\n')) version.remove_suffix(1);
+  if (!version.starts_with("&game="))
+    Fail("invalid_installation", "Choose an STFC game folder with the official client version marker.");
+  version.remove_prefix(6);
+  if (version.empty() || version.size()>10 || version.find_first_not_of("0123456789")!=version.npos
+      || std::stoull(std::string(version))==0 || std::stoull(std::string(version))>2147483647)
+    Fail("invalid_installation", "Choose an STFC game folder with a valid client version marker.");
+}
+struct InstallationEntry { Json metadata, projection; fs::path directory; std::string revision; };
+InstallationEntry RegisteredInstallation(const fs::path& root, std::string_view id, bool require_available = false)
+{
+  ValidateId(id);
+  const auto directory = root / "installations" / id;
+  if (!fs::exists(directory)) Fail("installation_missing", "The selected installation registration was not found.");
+  Plain(directory,true); const auto raw = Read(directory / "metadata.json"); const auto metadata = Parse(raw);
+  if (!metadata.is_object() || metadata.value("schemaVersion",0) != 1
+      || !metadata.contains("name") || !metadata["name"].is_string()
+      || !metadata.contains("gameDirectory") || !metadata["gameDirectory"].is_string()
+      || !metadata.contains("physicalIdentity") || !metadata["physicalIdentity"].is_string()
+      || metadata["physicalIdentity"].get<std::string>().size() != 64
+      || metadata["physicalIdentity"].get<std::string>().find_first_not_of("0123456789abcdef") != std::string::npos)
+    Fail("invalid_metadata", "Installation registration metadata is malformed.");
+  Name(metadata.at("name").get<std::string>());
+  const auto game = Path(metadata.at("gameDirectory").get<std::string>());
+  if (!game.is_absolute()) Fail("invalid_metadata", "Registered installation paths must be absolute.");
+  for (const auto& item:fs::directory_iterator(directory))
+    if (item.path().filename() != "metadata.json")
+      Fail("interrupted_write", "Installation metadata has an interrupted or unknown file. Inspect it before continuing.");
+  std::string state = "unknown", message;
+  try {
+    const auto observed = ObserveInstallation(game);
+    if (observed.identity != metadata.at("physicalIdentity").get<std::string>())
+      Fail("installation_changed", "The directory at the registered path has changed. Choose or register the intended installation explicitly.");
+    ValidateInstallationImage(observed.directory);
+    state = "available";
+  } catch (const CatalogError& error) { if (require_available) throw; message = error.what(); }
+  const auto revision = Hash(raw);
+  Json projection{{"id",id},{"name",metadata.at("name")},{"gameDirectory",metadata.at("gameDirectory")},
+      {"physicalIdentity",metadata.at("physicalIdentity").get<std::string>()},{"revision",revision},{"state",state}};
+  if (!message.empty()) projection["message"] = message;
+  return {metadata, projection, directory, revision};
+}
+Json InstallationRegistrations(const fs::path& root)
+{
+  Json installations=Json::array(), issues=Json::array(); std::vector<fs::path> paths;
+  for (const auto& item:fs::directory_iterator(root / "installations")) paths.push_back(item.path());
+  std::sort(paths.begin(),paths.end()); std::string digest; std::set<std::string> identities;
+  for (const auto& path:paths) {
+    const auto id=Utf8(path.filename());
+    try {
+      const auto entry=RegisteredInstallation(root,id);
+      if (!identities.insert(entry.metadata.at("physicalIdentity").get<std::string>()).second)
+        Fail("duplicate_installation", "More than one registration identifies the same physical installation. Inspect the catalog before selecting it.");
+      installations.push_back(entry.projection); digest += id+":"+entry.revision+"\n";
+    } catch (const std::exception& error) {
+      const auto* typed=dynamic_cast<const CatalogError*>(&error);
+      issues.push_back({{"id",id},{"code",typed?typed->Code():"invalid_metadata"},{"message",error.what()}});
+      digest += id+":invalid:"+error.what()+"\n";
+    }
+  }
+  return {{"apiVersion",2},{"ok",true},{"installations",installations},{"issues",issues},{"revision",Hash(digest)}};
+}
+Json RegisterInstallation(const fs::path& root, const Json& request)
+{
+  const auto name=Name(request.at("name").get<std::string>());
+  const auto observed=ObserveInstallation(Path(request.at("gameDirectory").get<std::string>()));
+  ValidateInstallationImage(observed.directory);
+  std::unique_ptr<InstallationEntry> existing;
+  for (const auto& item:fs::directory_iterator(root / "installations")) {
+    const auto entry=RegisteredInstallation(root,Utf8(item.path().filename()));
+    if (entry.metadata.at("physicalIdentity").get<std::string>() != observed.identity) continue;
+    if (existing) Fail("duplicate_installation", "More than one registration identifies this physical installation.");
+    existing=std::make_unique<InstallationEntry>(entry);
+  }
+  if (existing) {
+    // A moved original still has its identity, but registration is not relocation.
+    // Selection cannot silently rewrite a missing path or its update journal.
+    if (existing->projection.at("state") != "available")
+      Fail("installation_unknown", "This physical installation has a stale registration. Relocation needs an explicit reviewed operation; the saved path was preserved.");
+    return {{"apiVersion",2},{"ok",true},{"installation",existing->projection},{"created",false}};
+  }
+  const auto id=NewId(); const auto destination=root / "installations" / id;
+  if (fs::exists(destination)) Fail("duplicate_id", "The generated installation ID already exists. Try again.");
+  const auto staging=root / "installations" / (".register-"+id);
+  if (!fs::create_directory(staging)) Fail("write_failed", "Installation registration could not be staged.");
+  Atomic(staging / "metadata.json",Json{{"schemaVersion",1},{"name",name},
+      {"gameDirectory",Utf8(observed.directory)},{"physicalIdentity",observed.identity}}.dump(2)+"\n");
+  fs::rename(staging,destination);
+  return {{"apiVersion",2},{"ok",true},{"installation",RegisteredInstallation(root,id,true).projection},{"created",true}};
+}
+std::string SelectedGame(const fs::path& root, const Json& request, const Json& metadata)
+{
+  const auto selected = request.value("installationId", request.contains("gameDirectory") ? std::string{} : metadata.value("preferredInstallationId",std::string{}));
+  if (!selected.empty()) {
+    const auto entry=RegisteredInstallation(root,selected,true);
+    const auto game=entry.metadata.at("gameDirectory").get<std::string>();
+    if (request.contains("gameDirectory") && ObserveInstallation(Path(request.at("gameDirectory").get<std::string>())).identity != entry.metadata.at("physicalIdentity").get<std::string>())
+      Fail("installation_changed", "The explicit game path does not match the selected installation registration.");
+    return game;
+  }
+  return Game(request.value("gameDirectory",metadata.value("gameDirectory",std::string{})));
+}
 struct Entry { Json metadata; Json public_data; std::string revision; fs::path directory; };
 Entry Load(const fs::path& root, std::string_view id, bool archived)
 {
@@ -326,26 +472,58 @@ Entry Load(const fs::path& root, std::string_view id, bool archived)
   const auto raw = Read(directory / "metadata.json");
   const auto metadata = Parse(raw);
   if (!metadata.is_object() || !metadata.contains("schemaVersion")
-      || metadata["schemaVersion"] != 1 || !metadata.contains("name") || !metadata["name"].is_string()
+      || !metadata.contains("name") || !metadata["name"].is_string())
+    Fail("invalid_metadata", "Profile metadata is incomplete or uses an unsupported version: " + Utf8(directory));
+  const bool ordinary = metadata["schemaVersion"] == 2;
+  if (ordinary) {
+    if (metadata.value("kind", std::string{}) != "windows-user"
+        || metadata.value("name", std::string{}) != "Default"
+        || !metadata.contains("ownerUserId") || !metadata["ownerUserId"].is_string()
+        || metadata["ownerUserId"].get<std::string>() != OwnerUserId())
+      Fail("invalid_metadata", "The Default descriptor must identify the current Windows user.");
+    if (archived) Fail("profile_kind", "The Windows setup cannot be archived.");
+    for (auto property = metadata.begin(); property != metadata.end(); ++property)
+      if (property.key() != "schemaVersion" && property.key() != "kind" && property.key() != "name"
+          && property.key() != "ownerUserId" && property.key() != "gameDirectory" && property.key() != "preferredInstallationId")
+        Fail("invalid_metadata", "Default metadata must not contain isolated preference or lifecycle fields.");
+    for (const auto& file : fs::directory_iterator(directory))
+      if (file.path().filename() != "metadata.json" && !file.path().filename().string().starts_with(".write-"))
+        Fail("invalid_metadata", "Default contains descriptor metadata only; external Windows setup data must stay outside it.");
+  } else if (metadata["schemaVersion"] != 1 || metadata.contains("kind")
       || !metadata.contains("preferencesInitialized") || !metadata["preferencesInitialized"].is_boolean())
     Fail("invalid_metadata", "Profile metadata is incomplete or uses an unsupported version: " + Utf8(directory));
   Name(metadata["name"].get<std::string>());
   if (metadata.contains("gameDirectory") && !metadata["gameDirectory"].is_string())
     Fail("invalid_metadata", "Preferred installation metadata must be a path string.");
   const auto game = Game(metadata.value("gameDirectory", std::string{}));
+  if (metadata.contains("preferredInstallationId") && !metadata["preferredInstallationId"].is_string())
+    Fail("invalid_metadata", "Preferred installation identity must be a string.");
+  const auto preferred = metadata.value("preferredInstallationId",std::string{});
+  if (!preferred.empty()) ValidateId(preferred);
   // Unresolved interrupted metadata writes must be inspected before mutation.
   for (const auto& file : fs::directory_iterator(directory))
     if (file.path().filename().string().starts_with(".write-"))
       Fail("interrupted_write", "An interrupted metadata write needs inspection: " + Utf8(file.path()));
   const auto revision = Hash(std::string(archived ? "archived\n" : "active\n") + raw);
-  return {metadata,
-      {{"id", id}, {"name", metadata["name"]}, {"gameDirectory", game},
-       {"directory", Utf8(directory)}, {"configPath", Utf8(directory / "config.toml")},
-       {"logPath", Utf8(directory / "logs" / "Player.log")}, {"revision", revision},
-       {"state", archived ? "archived" : "active"},
-       {"preferencesInitialized", metadata["preferencesInitialized"]}}, revision, directory};
+  Json projection{{"id", id}, {"name", metadata["name"]}, {"gameDirectory", game},
+      {"directory", Utf8(directory)}, {"revision", revision}, {"state", archived ? "archived" : "active"},
+      {"kind", ordinary ? "windows-user" : "isolated"}, {"builtIn", ordinary},
+      {"preferenceScope", ordinary ? "windows-user" : "profile"},
+      {"configurationScope", ordinary ? "installation" : "profile"}};
+  projection["preferredInstallationId"] = preferred;
+  if (!preferred.empty()) {
+    try { projection["installationState"] = RegisteredInstallation(root,preferred).projection.at("state"); }
+    catch (const CatalogError&) { projection["installationState"] = "unknown"; }
+  }
+  if (ordinary) projection["ownerUserId"] = metadata["ownerUserId"];
+  else {
+    projection["configPath"] = Utf8(directory / "config.toml");
+    projection["logPath"] = Utf8(directory / "logs" / "Player.log");
+    projection["preferencesInitialized"] = metadata["preferencesInitialized"];
+  }
+  return {metadata, projection, revision, directory};
 }
-Json Discover(const fs::path& root, bool archived)
+Json Discover(const fs::path& root, bool archived, int api_version = 2)
 {
   Json profiles = Json::array(), issues = Json::array();
   std::vector<fs::path> paths;
@@ -357,6 +535,7 @@ Json Discover(const fs::path& root, bool archived)
     const auto id = Utf8(path.filename());
     try {
       const auto entry = Load(root, id, archived);
+      if (api_version == 1 && WindowsUser(entry.metadata)) continue;
       profiles.push_back(entry.public_data);
       digest += id + ":" + entry.revision + "\n";
     } catch (const std::exception& error) {
@@ -369,12 +548,44 @@ Json Discover(const fs::path& root, bool archived)
   return {{"apiVersion", 1}, {"ok", true}, {"revision", Hash(digest)},
           {"profiles", profiles}, {"issues", issues}};
 }
+Entry DefaultEntry(const fs::path& root, bool ensure)
+{
+  std::unique_ptr<Entry> selected;
+  // Invalid or interrupted entries must be inspected before a second built-in
+  // identity could be published. Directory names remain the ID authority.
+  for (const auto& item : fs::directory_iterator(root / "profiles")) {
+    const auto entry = Load(root, Utf8(item.path().filename()), false);
+    if (!WindowsUser(entry.metadata)) continue;
+    if (selected) Fail("duplicate_default", "More than one Windows setup descriptor exists. Inspect the catalog before continuing.");
+    selected = std::make_unique<Entry>(entry);
+  }
+  for (const auto& item : fs::directory_iterator(root / "archives")) {
+    (void)Load(root, Utf8(item.path().filename()), true);
+  }
+  if (selected) return *selected;
+  if (!ensure) Fail("default_missing", "Default has not been registered in this catalog. Ensure Default before selecting it.");
+  const auto owner = OwnerUserId();
+  const auto id = NewId();
+  if (fs::exists(root / "profiles" / id) || fs::exists(root / "archives" / id))
+    Fail("duplicate_id", "The generated Default ID already exists. Try again.");
+  const auto staging = root / "profiles" / (".default-" + id);
+  if (!fs::create_directory(staging)) Fail("write_failed", "Default could not be staged.");
+  Atomic(staging / "metadata.json", Json{{"schemaVersion", 2}, {"kind", "windows-user"},
+      {"name", "Default"}, {"ownerUserId", owner}}.dump(2) + "\n");
+  fs::rename(staging, root / "profiles" / id);
+  return Load(root, id, false);
+}
+void TypedAccess(const Json& metadata, int api_version)
+{
+  if (api_version == 1 && WindowsUser(metadata))
+    Fail("api_version", "Default requires the typed catalog API version 2. Update this Profiles client.");
+}
 void Revision(const Json& request, const Entry& entry, const fs::path& root, bool archived)
 {
   if (!request.contains("expectedRevision") || !request["expectedRevision"].is_string())
     Fail("revision_required", "Read the profile before modifying it and supply its expected revision.");
   const auto expected = request["expectedRevision"].get<std::string>();
-  if (expected != entry.revision && expected != Discover(root, archived)["revision"].get<std::string>())
+  if (expected != entry.revision && expected != Discover(root, archived, request.value("apiVersion", 1))["revision"].get<std::string>())
     Fail("stale_revision", "The profile changed; refresh it before retrying.");
 }
 std::uint32_t CurrentPid()
@@ -509,6 +720,47 @@ void InstallationReady(const fs::path& root, const fs::path& game)
     Fail("recovery_required", "Recover the unfinished game update before launching this installation.");
 #endif
 }
+Json LaunchOrdinary(const fs::path& root, const Json& request)
+{
+#if _WIN32
+  Lock catalog(root / ".locks" / "catalog.lock", false, true);
+  const auto entry = Load(root, request.at("id").get<std::string>(), false);
+  if (!WindowsUser(entry.metadata))
+    Fail("profile_kind", "Ordinary launch requires the Windows setup descriptor. Launch isolated profiles through their isolation coordinator.");
+  // Reject duplicate built-in identities before starting an ordinary process.
+  if (DefaultEntry(root, false).public_data.at("id") != entry.public_data.at("id"))
+    Fail("duplicate_default", "The selected Windows setup is not the catalog's Default descriptor.");
+  const auto game = Path(SelectedGame(root, request, entry.metadata));
+  if (game.empty()) Fail("installation_required", "Choose a game installation or save a preferred installation for Default.");
+  InstallationLease installation(root, game, false);
+  InstallationReady(root, game);
+  const auto executable = fs::canonical(game / "prime.exe");
+  Plain(executable, false);
+  std::wstring command = Quote(executable.native());
+  STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
+  if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+                      CREATE_SUSPENDED, nullptr, game.c_str(), &startup, &process))
+    Fail("launch_failed", "Windows could not start the selected game executable.");
+  Json identity;
+  try {
+    identity = Process(process.dwProcessId);
+    if (identity.is_null()) Fail("game_exited", "The ordinary game process exited during startup.");
+    if (ResumeThread(process.hThread) == static_cast<DWORD>(-1))
+      Fail("launch_failed", "Windows could not resume the selected game.");
+  } catch (...) {
+    TerminateProcess(process.hProcess, 190); CloseHandle(process.hThread); CloseHandle(process.hProcess); throw;
+  }
+  CloseHandle(process.hThread); CloseHandle(process.hProcess);
+  // Startup access closes after the exact process snapshot. Ordinary sessions
+  // are subsequently observed by installation process inspection; they do not
+  // acquire isolated writer/browser leases or publish isolation readiness.
+  return {{"apiVersion", 2}, {"ok", true}, {"profile", entry.public_data},
+      {"processId", identity.at("processId")}, {"started", identity.at("started")},
+      {"executable", identity.at("executable")}, {"readiness", "ordinary"}, {"session", identity}};
+#else
+  Fail("platform_unavailable", "Windows setup ordinary launch is available on Windows only.");
+#endif
+}
 Json Launch(const fs::path& root, const Json& request)
 {
   Json identity, profile;
@@ -516,8 +768,9 @@ Json Launch(const fs::path& root, const Json& request)
   {
     Lock catalog(root / ".locks" / "catalog.lock", false, true);
     const auto id = request.at("id").get<std::string>(); ValidateId(id);
-    const auto entry = Load(root, id, false); profile = entry.public_data;
-    const auto game = Path(Game(request.value("gameDirectory", entry.metadata.value("gameDirectory", std::string{}))));
+    const auto entry = Load(root, id, false);
+    Isolated(entry.metadata); profile = entry.public_data;
+    const auto game = Path(SelectedGame(root, request, entry.metadata));
     if (game.empty()) Fail("installation_required", "Choose a game installation with --game or save a preferred installation.");
     installation = std::make_unique<InstallationLease>(root, game, false);
     InstallationReady(root, game);
@@ -671,6 +924,7 @@ SessionLease::SessionLease(const fs::path& requested, std::string_view id) : imp
   ValidateId(id); impl_->root = CatalogRoot(requested); impl_->id = id;
   Lock catalog(impl_->root / ".locks" / "catalog.lock", false, true);
   const auto entry = Load(impl_->root, id, false);
+  Isolated(entry.metadata);
   impl_->directory = entry.directory; impl_->initialized = entry.metadata["preferencesInitialized"];
   impl_->identity = Process(CurrentPid());
   impl_->installation = std::make_unique<InstallationLease>(impl_->root,
@@ -719,7 +973,8 @@ BrowserLease::BrowserLease(const fs::path& requested, std::string_view id) : imp
 {
   ValidateId(id); impl_->root = CatalogRoot(requested); impl_->id = id;
   Lock catalog(impl_->root / ".locks" / "catalog.lock", false, true);
-  impl_->directory = Load(impl_->root, id, false).directory;
+  const auto entry = Load(impl_->root, id, false);
+  Isolated(entry.metadata); impl_->directory = entry.directory;
   impl_->data = Lock(impl_->root / ".locks" / (std::string(id) + ".data.lock"), true);
 }
 BrowserLease::~BrowserLease() = default;
@@ -730,13 +985,15 @@ const fs::path& BrowserLease::Directory() const { return impl_->directory; }
 const std::string& BrowserLease::Id() const { return impl_->id; }
 bool BrowserLease::Owns() const noexcept { return impl_ && impl_->data.Owns(); }
 
-std::string ExecuteCatalogRequest(std::string_view request_utf8)
+static std::string ExecuteCatalogRequestInternal(std::string_view request_utf8)
 {
   try {
     if (request_utf8.size() > 65536) Fail("request_too_large", "The catalog request exceeds its supported size.");
     const auto request = Parse(request_utf8);
-    if (!request.is_object() || request.value("apiVersion", 0) != 1)
-      Fail("api_version", "The catalog request requires apiVersion 1.");
+    if (!request.is_object() || !request.contains("apiVersion") || !request["apiVersion"].is_number_integer()
+        || (request["apiVersion"] != 1 && request["apiVersion"] != 2))
+      Fail("api_version", "The catalog request requires integer apiVersion 1 or 2.");
+    const auto api_version = request["apiVersion"].get<int>();
     const auto operation = request.at("operation").get<std::string>();
     if (operation == "catalog-location") {
       if (request.contains("root")) Fail("invalid_request", "Catalog location reports the OS-user root; omit root.");
@@ -744,7 +1001,16 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     }
     if (operation == "installation-status" || operation == "check-game-update"
         || operation == "update-game" || operation == "recover-game-update")
-      return ExecuteInstallationRequest(request_utf8);
+    {
+      auto installation_request = request; installation_request["apiVersion"] = 1;
+      if (request.contains("installationId")) {
+        if (api_version != 2) Fail("api_version", "Installation registration requires typed catalog API version 2.");
+        const auto root=CatalogRoot(request.contains("root")?Path(request.at("root").get<std::string>()):DefaultCatalogRoot());
+        Lock catalog(root / ".locks" / "catalog.lock",false,true);
+        installation_request["gameDirectory"]=SelectedGame(root,request,Json::object());
+      }
+      return ExecuteInstallationRequest(installation_request.dump());
+    }
     if (operation == "import-sources") {
 #if _WIN32
       Json users = Json::array();
@@ -768,7 +1034,13 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
       const auto source = ResolveImportUser(request.at("sourceUserSid").get<std::string>());
       const auto destination = CurrentImportUser();
       const auto name = Name(request.at("name").get<std::string>());
-      const auto game = Game(request.value("gameDirectory",std::string{}));
+      const auto preferred = request.value("preferredInstallationId",std::string{});
+      Json choice=request;
+      if (!preferred.empty()) {
+        if (api_version != 2) Fail("api_version", "Installation registration requires typed catalog API version 2.");
+        choice["installationId"]=preferred;
+      }
+      const auto game = SelectedGame(root,choice,Json::object());
       if (operation == "prepare-user-import") {
         bool elevation = false; std::string reason;
         try { CheckImportAccess(source); }
@@ -781,10 +1053,15 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
         return Json{{"apiVersion",1},{"ok",true},{"importPlan",{
           {"sourceUserSid",source.sid},{"sourceUserName",source.name},
           {"destinationUserSid",destination.sid},{"destinationUserName",destination.name},
-          {"name",name},{"gameDirectory",game},{"requiresElevation",elevation},{"reason",reason}}}}.dump();
+          {"name",name},{"gameDirectory",game},{"preferredInstallationId",preferred},
+          {"installationRevision",preferred.empty()?std::string{}:RegisteredInstallation(root,preferred,true).revision},
+          {"requiresElevation",elevation},{"reason",reason}}}}.dump();
       }
       if (request.value("expectedDestinationSid",std::string{}) != destination.sid)
         Fail("destination_changed", "The destination Windows user changed. Prepare the import again.");
+      const auto selected_revision = request.value("expectedInstallationRevision",std::string{});
+      if (!preferred.empty() && selected_revision != RegisteredInstallation(root,preferred,true).revision)
+        Fail("installation_changed", "The selected installation changed. Prepare the import again.");
       // The elevated helper captures only. Publication and encryption always run
       // under this original destination user, after capture succeeds.
       auto preferences = CaptureImport(source,request.value("allowElevation",false));
@@ -797,8 +1074,15 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
       try {
         fs::create_directory(staging / "logs");
         ProfilePrefsStore::CreateImported(staging,id,preferences);
-        Atomic(staging / "metadata.json",Json{{"schemaVersion",1},{"name",name},{"gameDirectory",game},
-          {"preferencesInitialized",true},{"importSourceUserSid",source.sid}}.dump(2) + "\n");
+        Json metadata{{"schemaVersion",1},{"name",name},{"gameDirectory",game},
+          {"preferencesInitialized",true},{"importSourceUserSid",source.sid}};
+        if (!preferred.empty()) {
+          // Revalidate after capture/elevation before publishing any imported ID.
+          if (selected_revision != RegisteredInstallation(root,preferred,true).revision)
+            Fail("installation_changed", "The selected installation changed during capture. No profile was published.");
+          metadata["preferredInstallationId"]=preferred;
+        }
+        Atomic(staging / "metadata.json",metadata.dump(2) + "\n");
         fs::rename(staging,root / "profiles" / id);
       } catch (...) {
         // A failed unpublished copy is safe to remove, never the source store.
@@ -808,43 +1092,94 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
         throw;
       }
       return Json{{"apiVersion",1},{"ok",true},{"profile",Load(root,id,false).public_data},
-                  {"revision",Discover(root,false)["revision"]}}.dump();
+                  {"revision",Discover(root,false,api_version)["revision"]}}.dump();
 #else
       Fail("platform_unavailable", "Windows user import is available on Windows. macOS user import is not implemented yet.");
 #endif
     }
 
-    if (operation == "launch") return Launch(root, request).dump();
+    if (operation == "launch" || operation == "launch-ordinary") {
+      if (api_version == 1) {
+        Lock catalog(root / ".locks" / "catalog.lock", false, true);
+        TypedAccess(Load(root, request.at("id").get<std::string>(), false).metadata, api_version);
+      }
+      if (operation == "launch-ordinary" && api_version != 2)
+        Fail("api_version", "Ordinary profile launch requires the typed catalog API version 2.");
+      return (operation == "launch-ordinary" ? LaunchOrdinary(root, request) : Launch(root, request)).dump();
+    }
     Lock catalog(root / ".locks" / "catalog.lock", false, true);
     const bool archived = request.value("archived", false);
-    if (operation == "list") return Discover(root, archived).dump();
+    if (operation == "installations" || operation == "register-installation" || operation == "installation-paths") {
+      if (api_version != 2) Fail("api_version", "Installation registration requires typed catalog API version 2.");
+      if (operation == "installations") return InstallationRegistrations(root).dump();
+      if (operation == "register-installation") return RegisterInstallation(root,request).dump();
+      return Json{{"apiVersion",2},{"ok",true},{"installation",RegisteredInstallation(root,request.at("installationId").get<std::string>()).projection}}.dump();
+    }
+    if (operation == "ensure-default" || operation == "resolve-default") {
+      if (api_version != 2) Fail("api_version", "Default requires the typed catalog API version 2.");
+      if (archived || request.contains("id") || request.contains("name") || request.contains("gameDirectory"))
+        Fail("invalid_request", "Resolve or ensure Default without a selector, name, installation or archive state.");
+      const auto entry = DefaultEntry(root, operation == "ensure-default");
+      return Json{{"apiVersion", 2}, {"ok", true}, {"profile", entry.public_data},
+          {"revision", Discover(root, false, 2)["revision"]}}.dump();
+    }
+    if (operation == "list") return Discover(root, archived, api_version).dump();
     if (operation == "sessions") return Sessions(root).dump();
     if (operation == "create") {
       const auto name = Name(request.at("name").get<std::string>());
-      const auto game = Game(request.value("gameDirectory", std::string{}));
+      const auto preferred = request.value("preferredInstallationId",std::string{});
+      Json choice=request;
+      if (!preferred.empty()) {
+        if (api_version != 2) Fail("api_version", "Installation registration requires typed catalog API version 2.");
+        choice["installationId"]=preferred;
+      }
+      const auto game = SelectedGame(root,choice,Json::object());
       const auto id = NewId();
       if (fs::exists(root / "profiles" / id) || fs::exists(root / "archives" / id))
         Fail("duplicate_id", "The generated profile ID already exists; create again.");
       const auto staging = root / "profiles" / (".create-" + id);
       fs::create_directory(staging); fs::create_directory(staging / "logs");
-      Atomic(staging / "metadata.json", Json{{"schemaVersion", 1}, {"name", name},
-          {"gameDirectory", game}, {"preferencesInitialized", false}}.dump(2) + "\n");
+      Json metadata{{"schemaVersion",1},{"name",name},{"gameDirectory",game},{"preferencesInitialized",false}};
+      if (!preferred.empty()) metadata["preferredInstallationId"]=preferred;
+      Atomic(staging / "metadata.json",metadata.dump(2) + "\n");
       fs::rename(staging, root / "profiles" / id);
       return Json{{"apiVersion", 1}, {"ok", true}, {"profile", Load(root, id, false).public_data},
-                  {"revision", Discover(root, false)["revision"]}}.dump();
+                  {"revision", Discover(root, false, api_version)["revision"]}}.dump();
     }
     const auto id = request.at("id").get<std::string>(); ValidateId(id);
     const bool from_archive = operation == "restore" || archived;
     auto entry = Load(root, id, from_archive);
+    TypedAccess(entry.metadata, api_version);
     if (operation == "paths")
       return Json{{"apiVersion", 1}, {"ok", true}, {"profile", entry.public_data}}.dump();
+    if (WindowsUser(entry.metadata) && operation != "edit")
+      Fail("profile_kind", "Default keeps the existing Windows setup. It cannot be renamed, archived, restored or deleted.");
+    if (WindowsUser(entry.metadata) && request.contains("name"))
+      Fail("profile_kind", "The built-in Windows setup keeps its Default name.");
     Revision(request, entry, root, from_archive);
     if (operation == "rename" || operation == "edit") {
       if (request.contains("name")) entry.metadata["name"] = Name(request.at("name").get<std::string>());
-      if (request.contains("gameDirectory")) entry.metadata["gameDirectory"] = Game(request.at("gameDirectory").get<std::string>());
+      if (request.contains("preferredInstallationId")) {
+        if (api_version != 2) Fail("api_version", "Preferred installation registration requires typed catalog API version 2.");
+        const auto preferred=request.at("preferredInstallationId").get<std::string>();
+        if (preferred.empty()) entry.metadata.erase("preferredInstallationId");
+        else {
+          const auto installation=RegisteredInstallation(root,preferred,true);
+          if (request.contains("gameDirectory") && ObserveInstallation(Path(request.at("gameDirectory").get<std::string>())).identity != installation.metadata.at("physicalIdentity").get<std::string>())
+            Fail("installation_changed", "The preferred registration and explicit game path do not match.");
+          entry.metadata["preferredInstallationId"]=preferred;
+          entry.metadata["gameDirectory"]=installation.metadata.at("gameDirectory");
+        }
+      }
+      if (request.contains("gameDirectory") && (!request.contains("preferredInstallationId")
+          || request.at("preferredInstallationId").get<std::string>().empty())) {
+        // An explicit path edit replaces the previous registration preference.
+        entry.metadata.erase("preferredInstallationId");
+        entry.metadata["gameDirectory"] = Game(request.at("gameDirectory").get<std::string>());
+      }
       Atomic(entry.directory / "metadata.json", entry.metadata.dump(2) + "\n");
       return Json{{"apiVersion", 1}, {"ok", true}, {"profile", Load(root, id, from_archive).public_data},
-                  {"revision", Discover(root, from_archive)["revision"]}}.dump();
+                  {"revision", Discover(root, from_archive, api_version)["revision"]}}.dump();
     }
     if (operation != "archive" && operation != "restore" && operation != "delete")
       Fail("unknown_operation", "Unknown catalog operation: " + operation);
@@ -867,11 +1202,23 @@ std::string ExecuteCatalogRequest(std::string_view request_utf8)
     if (fs::exists(destination)) Fail("destination_exists", "The destination already contains this profile ID.");
     fs::rename(entry.directory, destination);
     return Json{{"apiVersion", 1}, {"ok", true}, {"profile", Load(root, id, operation == "archive").public_data},
-                {"revision", Discover(root, operation == "archive")["revision"]}}.dump();
+                {"revision", Discover(root, operation == "archive", api_version)["revision"]}}.dump();
   } catch (const CatalogError& error) {
     return Json{{"apiVersion", 1}, {"ok", false}, {"error", {{"code", error.Code()}, {"message", error.what()}}}}.dump();
   } catch (const std::exception& error) {
     return Json{{"apiVersion", 1}, {"ok", false}, {"error", {{"code", "operation_failed"}, {"message", error.what()}}}}.dump();
   }
+}
+std::string ExecuteCatalogRequest(std::string_view request_utf8)
+{
+  const auto response = ExecuteCatalogRequestInternal(request_utf8);
+  // The exported allocator/entrypoint ABI stays v1; JSON v2 explicitly opts in
+  // to storage kinds. Existing isolated JSON v1 clients retain their contract.
+  try {
+    if (request_utf8.size() <= 65536 && Parse(request_utf8).value("apiVersion", Json{}) == Json(2)) {
+      auto typed = Parse(response); typed["apiVersion"] = 2; return typed.dump();
+    }
+  } catch (...) {}
+  return response;
 }
 } // namespace stfc::profiles

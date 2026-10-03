@@ -48,7 +48,7 @@ Arguments Parse(const std::vector<std::string>& input)
     if (argument=="--permanent") { result.permanent=true; continue; }
     if (argument=="--profile" || argument=="--game" || argument=="--game-dir" || argument=="--root"
         || argument=="--output" || argument=="--expected-revision" || argument=="--expected-version"
-        || argument=="--url" || argument=="--ready-fd" || argument=="--user") {
+        || argument=="--url" || argument=="--ready-fd" || argument=="--user" || argument=="--installation") {
       if (i+1==input.size() || input[i+1].starts_with("--"))
         throw std::runtime_error(argument+" requires a separate value");
       if (!result.values.emplace(argument=="--game-dir"?"--game":argument,input[++i]).second)
@@ -70,11 +70,11 @@ std::string Required(const Arguments& args,const char* key)
 }
 Json Call(Json request)
 {
-  request["apiVersion"]=1;
+  request["apiVersion"]=2;
   return Json::parse(stfc::profiles::ExecuteCatalogRequest(request.dump()));
 }
 Json Failure(std::string_view code,std::string_view message)
-{ return {{"apiVersion",1},{"ok",false},{"error",{{"code",code},{"message",message}}}}; }
+{ return {{"apiVersion",2},{"ok",false},{"error",{{"code",code},{"message",message}}}}; }
 #if _WIN32
 std::wstring ImportWide(std::string_view text) {
   const auto length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text.data(),static_cast<int>(text.size()),nullptr,0);
@@ -120,8 +120,14 @@ bool ConfirmImportElevation(const Json& plan) {
 #endif
 void Help()
 {
-  std::cout<<"stfc-profiles list [--archived]\n"
-           <<"stfc-profiles create NAME [--game PATH]\n"
+  std::cout<<"stfc-profiles default [--json]\n"
+           <<"stfc-profiles resolve-default [--json]\n"
+           <<"  Default is the existing Windows setup; --profile default resolves its immutable ID.\n"
+           <<"stfc-profiles list [--archived]\n"
+           <<"stfc-profiles installations [--json]\n"
+           <<"stfc-profiles register-installation NAME --game PATH\n"
+           <<"stfc-profiles installation-paths --installation ID\n"
+           <<"stfc-profiles create NAME [--game PATH | --installation ID]\n"
            <<"stfc-profiles users [--json] [--approve-elevation]\n"
            <<"stfc-profiles import NAME --user SID [--game PATH] [--approve-elevation]\n"
            <<"  Imports saved login and game preferences by Windows user, preserving the source.\n"
@@ -178,6 +184,7 @@ Json Shortcut(const Arguments& args,const Json& profile)
   if (!length || length==executable_path.size()) throw std::runtime_error("could not resolve the running profile coordinator");
   const auto target=std::filesystem::path(std::wstring(executable_path.data(),length));
   std::wstring arguments=L"launch --profile "+Quote(Wide(profile.at("id").get<std::string>()));
+  if (args.values.contains("--installation")) arguments+=L" --installation "+Quote(Wide(args.values.at("--installation")));
   if (args.values.contains("--game")) arguments+=L" --game "+Quote(Wide(args.values.at("--game")));
   if (args.values.contains("--root")) arguments+=L" --root "+Quote(Wide(args.values.at("--root")));
   if (FAILED(link->SetPath(target.c_str())) || FAILED(link->SetArguments(arguments.c_str()))
@@ -202,7 +209,7 @@ Json Shortcut(const Arguments& args,const Json& profile)
   const bool closed=CloseHandle(handle)!=0;
   if (!flushed || !closed || !MoveFileExW(temporary.c_str(),output.c_str(),MOVEFILE_WRITE_THROUGH))
     throw std::runtime_error("could not publish native shortcut without overwriting another file");
-  return {{"apiVersion",1},{"ok",true},{"profile",profile},{"shortcut",Utf8Path(output)}};
+  return {{"apiVersion",2},{"ok",true},{"profile",profile},{"shortcut",Utf8Path(output)}};
 }
 #else
 int InternalBrowser(const Arguments& args)
@@ -294,6 +301,7 @@ int Run(const std::vector<std::string>& input)
                  {"sourceUserSid",Required(args,"--user")}};
       if (args.values.contains("--root")) query["root"]=args.values.at("--root");
       if (args.values.contains("--game")) query["gameDirectory"]=args.values.at("--game");
+      if (args.values.contains("--installation")) query["preferredInstallationId"]=args.values.at("--installation");
       auto response=Call(query);
       if (response.value("ok",false)) {
         const auto& plan=response.at("importPlan");
@@ -316,6 +324,7 @@ int Run(const std::vector<std::string>& input)
         if (response.value("ok",false)) {
           query["operation"]="import-user";
           query["expectedDestinationSid"]=plan.at("destinationUserSid");
+          query["expectedInstallationRevision"]=plan.at("installationRevision");
           query["allowElevation"]=args.approve_elevation && plan.at("requiresElevation").get<bool>();
           response=Call(query);
         }
@@ -326,6 +335,17 @@ int Run(const std::vector<std::string>& input)
     if (args.values.contains("--user") || args.approve_elevation)
       throw std::runtime_error("--user applies to import; --approve-elevation applies to import or users");
     if (args.operation=="location") args.operation="catalog-location";
+    if (args.operation=="default") args.operation="ensure-default";
+    if (args.values.contains("--profile") && args.values.at("--profile")=="default") {
+      Json query{{"operation","resolve-default"}};
+      if (args.values.contains("--root")) query["root"]=args.values.at("--root");
+      auto resolved=Call(query);
+      if (!resolved.value("ok",false)) {
+        if (json_output) std::cout<<resolved.dump()<<'\n'; else std::cerr<<resolved.dump(2)<<'\n';
+        return 1;
+      }
+      args.values["--profile"]=resolved.at("profile").at("id").get<std::string>();
+    }
     bool installation=false;
     if (args.operation=="game") {
       if (args.positional.size()!=1) throw std::runtime_error("game requires status, check, update, or recover");
@@ -334,7 +354,7 @@ int Run(const std::vector<std::string>& input)
       const auto operation=operations.find(args.positional.front());
       if (operation==operations.end()) throw std::runtime_error("unknown game command");
       args.operation=operation->second;args.positional.clear();installation=true;
-      if (!args.values.contains("--game")) {
+      if (!args.values.contains("--game") && !args.values.contains("--installation")) {
         Json query{{"operation","paths"},{"id",Required(args,"--profile")}};
         if (args.values.contains("--root")) query["root"]=args.values.at("--root");
         const auto choice=Call(query);
@@ -345,21 +365,33 @@ int Run(const std::vector<std::string>& input)
         const auto game=choice.at("profile").at("gameDirectory").get<std::string>();
         if (game.empty()) throw std::runtime_error("profile has no preferred installation; provide --game PATH");
         args.values["--game"]=game;
+        const auto preferred=choice.at("profile").value("preferredInstallationId",std::string{});
+        if (!preferred.empty()) args.values["--installation"]=preferred;
+      }
+      if (args.values.contains("--installation")) {
+        Json lookup{{"operation","installation-paths"},{"installationId",args.values.at("--installation")}};
+        if (args.values.contains("--root")) lookup["root"]=args.values.at("--root");
+        const auto registered=Call(lookup);
+        if (!registered.value("ok",false) || registered.at("installation").at("state")!="available")
+          throw std::runtime_error("the selected installation is missing, changed or unavailable; choose it explicitly");
+        if (!args.values.contains("--game")) args.values["--game"]=registered.at("installation").at("gameDirectory").get<std::string>();
       }
       Required(args,"--game");
     }
     if (!installation && args.operation!="list" && args.operation!="create" && args.operation!="rename" && args.operation!="edit"
         && args.operation!="archive" && args.operation!="restore" && args.operation!="delete"
-        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut" && args.operation!="catalog-location" && args.operation!="import-sources")
+        && args.operation!="launch" && args.operation!="sessions" && args.operation!="shortcut" && args.operation!="catalog-location" && args.operation!="import-sources"
+        && args.operation!="ensure-default" && args.operation!="resolve-default"
+        && args.operation!="installations" && args.operation!="register-installation" && args.operation!="installation-paths")
       throw std::runtime_error("unknown command: "+args.operation);
     if ((args.operation=="catalog-location" || args.operation=="import-sources") && args.values.contains("--root"))
       throw std::runtime_error("location reports the OS-user root; omit --root");
-    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions" || args.operation=="catalog-location" || args.operation=="import-sources"))
+    if (args.values.contains("--profile") && (args.operation=="list" || args.operation=="create" || args.operation=="sessions" || args.operation=="catalog-location" || args.operation=="import-sources" || args.operation=="ensure-default" || args.operation=="resolve-default" || args.operation=="installations" || args.operation=="register-installation" || args.operation=="installation-paths"))
       throw std::runtime_error("--profile is not accepted for this command");
     if (args.values.contains("--output") && args.operation!="shortcut")
       throw std::runtime_error("--output applies only to shortcut");
     if (args.values.contains("--game") && !installation && args.operation!="create" && args.operation!="edit"
-        && args.operation!="launch" && args.operation!="shortcut")
+        && args.operation!="launch" && args.operation!="shortcut" && args.operation!="register-installation")
       throw std::runtime_error("--game is not accepted for this command");
     if (args.values.contains("--expected-revision") && args.operation!="rename" && args.operation!="edit"
         && args.operation!="archive" && args.operation!="restore" && args.operation!="delete")
@@ -368,11 +400,16 @@ int Run(const std::vector<std::string>& input)
       throw std::runtime_error("--expected-version applies only to game update");
     if (args.values.contains("--url") || args.values.contains("--ready-fd"))
       throw std::runtime_error("browser guardian arguments require the internal browser command");
-    if (args.operation=="edit" && !args.values.contains("--game"))
+    if (args.values.contains("--installation") && !installation && args.operation!="create" && args.operation!="edit"
+        && args.operation!="launch" && args.operation!="shortcut" && args.operation!="installation-paths")
+      throw std::runtime_error("--installation is not accepted for this command");
+    if (args.operation=="edit" && !args.values.contains("--game") && !args.values.contains("--installation"))
       throw std::runtime_error("edit requires --game PATH; use rename to change the display name");
     Json request{{"operation",args.operation},{"archived",args.archived}};
     if (args.values.contains("--root")) request["root"]=args.values.at("--root");
     if (args.values.contains("--game")) request["gameDirectory"]=args.values.at("--game");
+    if (args.values.contains("--installation"))
+      request[(args.operation=="create" || args.operation=="edit")?"preferredInstallationId":"installationId"]=args.values.at("--installation");
     if (args.values.contains("--expected-version")) {
       const auto& version=args.values.at("--expected-version");
       if (version.empty() || version.size()>10 || version.find_first_not_of("0123456789")!=version.npos)
@@ -381,12 +418,14 @@ int Run(const std::vector<std::string>& input)
       if (!value || value>2147483647) throw std::runtime_error("--expected-version is outside the supported range");
       request["expectedVersion"]=value;
     }
-    if (args.operation=="create" || args.operation=="rename") {
+    if (args.operation=="create" || args.operation=="rename" || args.operation=="register-installation") {
       if (args.positional.size()!=1) throw std::runtime_error("provide one display name; quote names containing spaces");
       request["name"]=args.positional.front();
     } else if (!args.positional.empty()) throw std::runtime_error("unexpected positional argument");
-    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions" && args.operation!="catalog-location" && args.operation!="import-sources")
+    if (!installation && args.operation!="create" && args.operation!="list" && args.operation!="sessions" && args.operation!="catalog-location" && args.operation!="import-sources" && args.operation!="ensure-default" && args.operation!="resolve-default" && args.operation!="installations" && args.operation!="register-installation" && args.operation!="installation-paths")
       request["id"]=Required(args,"--profile");
+    if (args.operation=="installation-paths") Required(args,"--installation");
+    if (args.operation=="register-installation") Required(args,"--game");
     if (args.operation=="delete") {
       if (!args.permanent || !args.archived) throw std::runtime_error("permanent deletion requires --archived --permanent");
       request["permanent"]=true;
@@ -416,7 +455,18 @@ int Run(const std::vector<std::string>& input)
 #else
       throw std::runtime_error("native macOS shortcut creation requires platform qualification");
 #endif
-    } else response=Call(request);
+    } else {
+      if (args.operation=="launch") {
+        Json query{{"operation","paths"},{"id",request.at("id")}};
+        if (request.contains("root")) query["root"]=request["root"];
+        auto selected_profile=Call(query);
+        if (!selected_profile.value("ok",false)) response=selected_profile;
+        else {
+          if (selected_profile.at("profile").at("kind")=="windows-user") request["operation"]="launch-ordinary";
+          response=Call(request);
+        }
+      } else response=Call(request);
+    }
     if (json_output) std::cout<<response.dump()<<'\n';
     else if (!response.value("ok",false)) std::cerr<<response.dump(2)<<'\n';
     else if (response.contains("profiles")) {
