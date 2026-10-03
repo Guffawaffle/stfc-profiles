@@ -172,6 +172,20 @@ void RegisteredRecovery(){
           "Recovery followed a replacement physical directory");
   }
 }
+void DirectoryCustody(){
+  Fixture f;
+  {
+    InstallationLease lease(f.catalog,f.game,false);
+    Check(lease.PhysicalIdentity().size()==64,"Lease omitted physical directory identity");
+    Throws([&]{fs::rename(f.game,f.root/"replacement-game");},"Held game directory was renamed");
+    Throws([&]{fs::rename(f.root,f.root.wstring()+L"-moved");},"Held installation ancestor was renamed");
+    const auto rejected=Json::parse(ExecuteInstallationRequest(Json{{"apiVersion",1},{"operation","installation-status"},
+        {"root",Utf8(f.catalog)},{"gameDirectory",Utf8(f.game)},{"installationPhysicalIdentity",std::string(64,'0')}}.dump()));
+    Check(!rejected.value("ok",false)&&rejected.at("error").at("code")=="installation_changed",
+          "Mismatched physical admission was accepted");
+  }
+  fs::rename(f.game,f.root/"replacement-game");fs::rename(f.root/"replacement-game",f.game);f.Original();
+}
 Json InterruptedImage(Fixture& fixture){
   auto journal=fixture.Stage();Throws([&]{Commit(fixture.game,fixture.transaction,fixture.ownership,journal,[](std::string_view point){if(point=="verified")throw std::runtime_error("interrupted image");});},"No completed-image interruption");return journal;
 }
@@ -222,7 +236,7 @@ void OwnershipAndApi(){
 #endif
 int main(){try{
 #if _WIN32
-  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RegisteredRecovery();RecoveryFinalization();
+  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RegisteredRecovery();DirectoryCustody();RecoveryFinalization();
   std::cout<<"Installation fixtures passed: official protocol, torrent integrity, safe extraction, crash recovery, preserved extras, executable gate and cross-root exclusion\n";
 #else
   std::cout<<"Direct updater is Windows-only; runtime qualification required on this platform\n";

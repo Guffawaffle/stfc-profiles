@@ -9,10 +9,13 @@ namespace stfc::profiles {
 
 // A game session holds shared installation access for its lifetime. Updating or
 // recovering an installation requires exclusive access to that exact directory.
+// Windows retains directory/ancestor handles without delete sharing. Observation
+// mode retains that namespace for status only, without owning a coordination lock.
 class InstallationLease {
 public:
   InstallationLease(const std::filesystem::path& root,
-                    const std::filesystem::path& gameDirectory, bool exclusive);
+                    const std::filesystem::path& gameDirectory, bool exclusive,
+                    bool observation_only = false);
   ~InstallationLease();
   InstallationLease(InstallationLease&&) noexcept;
   InstallationLease& operator=(InstallationLease&&) noexcept;
@@ -21,6 +24,7 @@ public:
   const std::filesystem::path& Root() const;
   const std::filesystem::path& Directory() const;
   const std::string& Key() const;
+  const std::string& PhysicalIdentity() const;
   bool Owns() const noexcept;
 private:
   struct Impl;

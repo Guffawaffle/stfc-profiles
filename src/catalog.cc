@@ -879,15 +879,50 @@ fs::path DefaultCatalogRoot()
 }
 void CheckInstallationReady(const fs::path& root, const fs::path& gameDirectory)
 { InstallationReady(root, gameDirectory); }
-struct InstallationLease::Impl { fs::path root, directory; std::string key; Lock access; };
-InstallationLease::InstallationLease(const fs::path& requested, const fs::path& game, bool exclusive)
+#if _WIN32
+struct InstallationDirectoryPin {
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  ~InstallationDirectoryPin() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+};
+#endif
+struct InstallationLease::Impl {
+  fs::path root, directory; std::string key, physical_identity; Lock access;
+#if _WIN32
+  std::vector<std::unique_ptr<InstallationDirectoryPin>> directory_pins;
+#endif
+};
+InstallationLease::InstallationLease(const fs::path& requested, const fs::path& game, bool exclusive, bool observation_only)
   : impl_(std::make_unique<Impl>())
 {
   impl_->root = CatalogRoot(requested);
+  if (exclusive && observation_only)
+    Fail("invalid_operation","Observation-only installation access cannot authorize a mutation.");
   if (!game.is_absolute()) Fail("invalid_installation", "The game installation must be an absolute directory.");
   if (game.native().find(fs::path::value_type{}) != game.native().npos)
     Fail("invalid_installation", "The game path cannot contain an embedded NUL character.");
   impl_->directory = fs::canonical(game);
+#if _WIN32
+  std::vector<fs::path> ancestors;
+  for (auto path=impl_->directory;;path=path.parent_path()) {
+    ancestors.push_back(path);
+    if (path==path.root_path() || path==path.parent_path()) break;
+  }
+  std::reverse(ancestors.begin(),ancestors.end());
+  for (const auto& path:ancestors) {
+    auto pin=std::make_unique<InstallationDirectoryPin>();
+    // Attribute-only handles do not participate in Windows share-access checks.
+    const auto handle=pin->handle=CreateFileW(path.c_str(),FILE_LIST_DIRECTORY|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    if (handle==INVALID_HANDLE_VALUE)
+      Fail("installation_unknown","Could not retain the selected installation directory through this operation.");
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!GetFileInformationByHandleEx(handle,FileAttributeTagInfo,&attributes,sizeof(attributes))
+        || !(attributes.FileAttributes&FILE_ATTRIBUTE_DIRECTORY) || (attributes.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT))
+      Fail("installation_changed","The installation directory chain changed during admission.");
+    impl_->directory_pins.push_back(std::move(pin));
+  }
+  impl_->physical_identity=ObserveInstallation(impl_->directory).identity;
+#endif
   std::string key_input = Utf8(impl_->directory);
 #if _WIN32
   // Windows paths compare without case. Both update and runtime admission use
@@ -903,6 +938,9 @@ InstallationLease::InstallationLease(const fs::path& requested, const fs::path& 
   key_input = Utf8(fs::path(folded));
 #endif
   impl_->key = Hash(key_input);
+  // Status observes an active mutation without claiming its coordination lock.
+  // Its directory handles still retain the selected namespace through the read.
+  if (observation_only) return;
   // Installation identity is independent of a caller's profile catalog root.
   // Only lifecycle files are touched here; no other catalog is discovered.
   const auto shared_root = DefaultCatalogRoot();
@@ -923,6 +961,7 @@ InstallationLease& InstallationLease::operator=(InstallationLease&&) noexcept = 
 const fs::path& InstallationLease::Root() const { return impl_->root; }
 const fs::path& InstallationLease::Directory() const { return impl_->directory; }
 const std::string& InstallationLease::Key() const { return impl_->key; }
+const std::string& InstallationLease::PhysicalIdentity() const { return impl_->physical_identity; }
 bool InstallationLease::Owns() const noexcept { return impl_ && impl_->access.Owns(); }
 struct SessionLease::Impl {
   fs::path root, directory; std::string id; Lock writer; Json identity;
@@ -1019,6 +1058,8 @@ static std::string ExecuteCatalogRequestInternal(std::string_view request_utf8)
         Lock catalog(root / ".locks" / "catalog.lock",false,true);
         const bool recovery = operation == "installation-status" || operation == "recover-game-update";
         installation_request["gameDirectory"]=SelectedGame(root,request,Json::object(),recovery);
+        installation_request["installationPhysicalIdentity"]=RegisteredInstallation(root,
+            request.at("installationId").get<std::string>(),true,recovery).metadata.at("physicalIdentity");
       }
       return ExecuteInstallationRequest(installation_request.dump());
     }

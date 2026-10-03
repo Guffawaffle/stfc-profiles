@@ -104,6 +104,16 @@ An explicit path override is a deliberate separate selection, not an automatic
 fallback from an unavailable registration. Canonical installation update locks,
 stopped-process checks and recovery boundaries remain in force.
 
+On Windows an admitted installation lease retains the canonical directory and
+its ancestors without delete sharing through the operation. Renaming or replacing
+that directory chain is refused until the lease ends; game files can still be
+updated within it. ID-bound maintenance forwards the registered physical identity
+and compares it after handles are acquired, before network or mutation work.
+Status keeps the handles through its snapshot, including an observation-only
+mode during a coordinated update. Observation mode does not own the update lock.
+These handles establish namespace continuity, not file-content immutability,
+ACL protection or authorization. macOS has no equivalent qualified custody yet.
+
 ## Per-user storage
 
 Windows root: `%LOCALAPPDATA%\STFC Profiles`.
@@ -391,9 +401,9 @@ Mod and standalone host source share the adapter. The runtime commits monotonic
 preference-initialization metadata before publishing readiness; missing established
 data cannot become a fresh empty account. Native game-update operations and
 Bridge presentation are implemented locally, with synthetic integrity/recovery
-fixtures. No new signed implementation checkpoint or player release is claimed
-by this in-progress documentation. Final pins, package/review checks, macOS native
-compilation/loading, and live dev update/account qualification remain open.
+fixtures. Signed development checkpoints and Windows/macOS architecture CI exist;
+they do not qualify a player release. Final consumer pins and package/review checks,
+macOS game loading and live dev update/account qualification remain separate work.
 
 Qualify ordinary launch, two distinct accounts from one executable,
 reverse restart persistence, duplicate-profile refusal, sign-in callbacks and

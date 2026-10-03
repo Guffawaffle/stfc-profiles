@@ -796,10 +796,21 @@ Json Run(const Json& request)
   const auto root=request.contains("root")?Path(request.at("root").get<std::string>()):DefaultCatalogRoot();
   const auto key=Key(game);const auto transaction=Transaction(game,key),ownership=Ownership(game,key);
   if(operation=="installation-status"){
-    bool active=false;try {InstallationLease inspection(root,game,false);}catch(const CatalogError& error){if(error.Code()!="busy")throw;active=true;}
+    bool active=false;std::unique_ptr<InstallationLease> inspection;
+    try {inspection=std::make_unique<InstallationLease>(root,game,false);}
+    catch(const CatalogError& error){
+      if(error.Code()!="busy")throw;active=true;
+      inspection=std::make_unique<InstallationLease>(root,game,false,true);
+    }
+    if(request.contains("installationPhysicalIdentity")
+        && request.at("installationPhysicalIdentity")!=Json(inspection->PhysicalIdentity()))
+      Fail("installation_changed","The installation directory changed before status admission.");
     return Json{{"apiVersion",1},{"ok",true},{"installation",Snapshot(game,transaction,active)}};
   }
   const bool mutation=operation=="update-game"||operation=="recover-game-update";InstallationLease lease(root,game,mutation);
+  if (request.contains("installationPhysicalIdentity")
+      && request.at("installationPhysicalIdentity")!=Json(lease.PhysicalIdentity()))
+    Fail("installation_changed","The installation directory changed before operation admission.");
   if(operation=="recover-game-update"){
     Stopped(game);
     if(!fs::exists(transaction))return Json{{"apiVersion",1},{"ok",true},{"installation",Snapshot(game,transaction,false)},{"recovered",false}};
