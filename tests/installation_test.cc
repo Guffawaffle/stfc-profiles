@@ -185,6 +185,45 @@ void DirectoryCustody(){
           "Mismatched physical admission was accepted");
   }
   fs::rename(f.game,f.root/"replacement-game");fs::rename(f.root/"replacement-game",f.game);f.Original();
+  {
+    Fixture active;active.Stage();
+    InstallationLease updater(active.catalog,active.game,true);
+    const auto status=Json::parse(ExecuteInstallationRequest(Json{{"apiVersion",1},{"operation","installation-status"},
+        {"root",Utf8(active.catalog)},{"gameDirectory",Utf8(active.game)},
+        {"installationPhysicalIdentity",updater.PhysicalIdentity()}}.dump()));
+    Check(status.value("ok",false)&&status.at("installation").at("state")=="updating",
+          "Status could not observe active update with retained namespace");
+    ThrowsCode([&]{InstallationLease invalid(active.catalog,active.game,true,true);},"invalid_operation");
+  }
+}
+void RedirectedSpelling(){
+  Fixture f;
+  const auto alias=f.root/L"alias";
+  fs::create_directory(alias);
+  const auto substitute=L"\\??\\"+f.root.wstring(),display=f.root.wstring();
+  struct MountPoint {
+    DWORD tag; WORD length,reserved,substitute_offset,substitute_length,display_offset,display_length;
+    wchar_t names[32768];
+  } data{};
+  data.tag=IO_REPARSE_TAG_MOUNT_POINT;
+  data.substitute_length=static_cast<WORD>(substitute.size()*sizeof(wchar_t));
+  data.display_offset=static_cast<WORD>((substitute.size()+1)*sizeof(wchar_t));
+  data.display_length=static_cast<WORD>(display.size()*sizeof(wchar_t));
+  data.length=static_cast<WORD>(8+data.display_offset+data.display_length+sizeof(wchar_t));
+  std::copy(substitute.begin(),substitute.end(),data.names);
+  std::copy(display.begin(),display.end(),data.names+substitute.size()+1);
+  {
+    Handle handle(CreateFileW(alias.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+    DWORD returned=0;
+    Check(handle.value!=INVALID_HANDLE_VALUE && DeviceIoControl(handle.value,FSCTL_SET_REPARSE_POINT,
+        &data,data.length+8,nullptr,0,&returned,nullptr),"Could not create disposable alias fixture");
+  }
+  try {
+    Check(fs::canonical(alias/L"game")==f.game,"Fixture alias did not resolve to original installation");
+    ThrowsCode([&]{InstallationLease lease(f.catalog,alias/L"game",false);},"installation_changed");
+  } catch(...) {fs::remove(alias);throw;}
+  fs::remove(alias);f.Original();
 }
 Json InterruptedImage(Fixture& fixture){
   auto journal=fixture.Stage();Throws([&]{Commit(fixture.game,fixture.transaction,fixture.ownership,journal,[](std::string_view point){if(point=="verified")throw std::runtime_error("interrupted image");});},"No completed-image interruption");return journal;
@@ -236,7 +275,7 @@ void OwnershipAndApi(){
 #endif
 int main(){try{
 #if _WIN32
-  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RegisteredRecovery();DirectoryCustody();RecoveryFinalization();
+  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RegisteredRecovery();DirectoryCustody();RedirectedSpelling();RecoveryFinalization();
   std::cout<<"Installation fixtures passed: official protocol, torrent integrity, safe extraction, crash recovery, preserved extras, executable gate and cross-root exclusion\n";
 #else
   std::cout<<"Direct updater is Windows-only; runtime qualification required on this platform\n";
