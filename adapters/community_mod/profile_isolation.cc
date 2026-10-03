@@ -1,19 +1,14 @@
 // Extracted from Guffawaffle/stfc-mod at 323fb857f51f4cb08231d4b150ea8b5bb59340d1.
 // See docs/PROVENANCE.json and LICENSE (GPL-3.0).
-#if _WIN32
-
-#include "il2cpp/method_contract.h"
-#include "stfc_profiles/windows/prefs_store.h"
 #include "stfc_profiles/community_mod_adapter.h"
-
-#include <il2cpp/il2cpp-functions.h>
-#include <il2cpp/il2cpp_helper.h>
-
+#include "runtime_api.h"
 #include <spdlog/spdlog.h>
 #include <spud/detour.h>
-
+#if _WIN32
 #include <Windows.h>
-#include <ShlObj.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -26,56 +21,43 @@
 #include <string_view>
 #include <utility>
 
-using namespace stfc::profiles::windows;
-
-namespace spud::detail::x64 {
-uintptr_t maybe_resolve_jump(uintptr_t);
-}
+#if defined(__aarch64__) || defined(_M_ARM64)
+namespace spud::detail::arm64 { uintptr_t maybe_resolve_jump(uintptr_t); }
+#else
+namespace spud::detail::x64 { uintptr_t maybe_resolve_jump(uintptr_t); }
+#endif
 
 namespace stfc::profiles::community_mod {
 
 namespace {
 
-std::wstring                       profile_id;
+std::string profile_id;
+std::filesystem::path profile_root;
+SessionLease* profile_lease = nullptr;
+std::unique_ptr<detail::RuntimeApi> runtime;
 std::unique_ptr<ProfilePrefsStore> profile_store;
 
 [[noreturn]] void FailClosed(const char* reason)
 {
   spdlog::critical("[ProfileIsolationProbe] {}", reason);
   spdlog::default_logger()->flush();
+  if (profile_lease) { try { profile_lease->MarkFailed(reason); } catch (...) {} }
+#if _WIN32
   ExitProcess(190);
+#else
+  _exit(190);
+#endif
   std::abort();
 }
 
-std::wstring KnownFolder(REFKNOWNFOLDERID folder_id)
+std::u16string_view RequiredString(void* value)
 {
-  PWSTR path = nullptr;
-  if (FAILED(SHGetKnownFolderPath(folder_id, 0, nullptr, &path)) || !path) {
-    CoTaskMemFree(path);
-    return {};
-  }
-  std::wstring result(path);
-  CoTaskMemFree(path);
-  return result;
-}
-
-bool HasForcedEdgeUserDataDir()
-{
-  for (const auto root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
-    DWORD size = 0;
-    const auto status = RegGetValueW(root, L"SOFTWARE\\Policies\\Microsoft\\Edge", L"UserDataDir", RRF_RT_ANY,
-                                     nullptr, nullptr, &size);
-    if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
-      return true;
-  }
-  return false;
-}
-
-std::u16string_view RequiredString(Il2CppString* value)
-{
-  if (!value || value->length < 0)
+  if (!runtime || !value) FailClosed("The client supplied an invalid profile preference string");
+  const auto size = runtime->string_length(value);
+  auto data = runtime->string_chars(value);
+  if (size < 0 || size > 8*1024*1024 || !data)
     FailClosed("The client supplied an invalid profile preference string");
-  return {reinterpret_cast<const char16_t*>(value->chars), static_cast<std::size_t>(value->length)};
+  return {data,static_cast<std::size_t>(size)};
 }
 
 template <typename Action>
@@ -90,7 +72,7 @@ decltype(auto) WithProfileStore(const char* failure, Action&& action)
   }
 }
 
-bool TrySetInt_Hook(auto, Il2CppString* key, int value)
+bool TrySetInt_Hook(auto, void* key, int value)
 {
   return WithProfileStore("Could not persist an integer preference", [&](ProfilePrefsStore& store) {
     store.SetInt(RequiredString(key), value);
@@ -98,7 +80,7 @@ bool TrySetInt_Hook(auto, Il2CppString* key, int value)
   });
 }
 
-bool TrySetFloat_Hook(auto, Il2CppString* key, float value)
+bool TrySetFloat_Hook(auto, void* key, float value)
 {
   return WithProfileStore("Could not persist a float preference", [&](ProfilePrefsStore& store) {
     store.SetFloat(RequiredString(key), value);
@@ -106,7 +88,7 @@ bool TrySetFloat_Hook(auto, Il2CppString* key, float value)
   });
 }
 
-bool TrySetString_Hook(auto, Il2CppString* key, Il2CppString* value)
+bool TrySetString_Hook(auto, void* key, void* value)
 {
   return WithProfileStore("Could not persist a string preference", [&](ProfilePrefsStore& store) {
     store.SetString(RequiredString(key), RequiredString(value));
@@ -114,35 +96,35 @@ bool TrySetString_Hook(auto, Il2CppString* key, Il2CppString* value)
   });
 }
 
-int GetInt_Hook(auto, Il2CppString* key, int fallback)
+int GetInt_Hook(auto, void* key, int fallback)
 {
   return WithProfileStore("Could not read an integer preference", [&](ProfilePrefsStore& store) {
     return store.GetInt(RequiredString(key), fallback);
   });
 }
 
-float GetFloat_Hook(auto, Il2CppString* key, float fallback)
+float GetFloat_Hook(auto, void* key, float fallback)
 {
   return WithProfileStore("Could not read a float preference", [&](ProfilePrefsStore& store) {
     return store.GetFloat(RequiredString(key), fallback);
   });
 }
 
-Il2CppString* GetString_Hook(auto, Il2CppString* key, Il2CppString* fallback)
+void* GetString_Hook(auto, void* key, void* fallback)
 {
-  return WithProfileStore("Could not read a string preference", [&](ProfilePrefsStore& store) -> Il2CppString* {
+  return WithProfileStore("Could not read a string preference", [&](ProfilePrefsStore& store) -> void* {
     const auto value = store.GetString(RequiredString(key));
     if (!value) {
       if (fallback)
         return fallback;
       // Unity's Windows PlayerPrefs.GetString(missing, nullptr) returns an empty string.
       constexpr char16_t empty[] = u"";
-      auto* result = il2cpp_string_new_utf16(reinterpret_cast<const Il2CppChar*>(empty), 0);
+      auto* result = runtime->string_new_utf16(empty, 0);
       if (!result)
         throw std::runtime_error("could not allocate empty preference string");
       return result;
     }
-    auto* result = il2cpp_string_new_utf16(reinterpret_cast<const Il2CppChar*>(value->data()),
+    auto* result = runtime->string_new_utf16(value->data(),
                                            static_cast<std::int32_t>(value->size()));
     if (!result)
       throw std::runtime_error("could not allocate preference string");
@@ -150,14 +132,14 @@ Il2CppString* GetString_Hook(auto, Il2CppString* key, Il2CppString* fallback)
   });
 }
 
-bool HasKey_Hook(auto, Il2CppString* key)
+bool HasKey_Hook(auto, void* key)
 {
   return WithProfileStore("Could not inspect a preference", [&](ProfilePrefsStore& store) {
     return store.HasKey(RequiredString(key));
   });
 }
 
-void DeleteKey_Hook(auto, Il2CppString* key)
+void DeleteKey_Hook(auto, void* key)
 {
   WithProfileStore("Could not delete a preference", [&](ProfilePrefsStore& store) {
     store.DeleteKey(RequiredString(key));
@@ -174,49 +156,13 @@ void Save_Hook(auto)
   WithProfileStore("Could not save profile preferences", [](ProfilePrefsStore& store) { store.Save(); });
 }
 
-bool LaunchProfileBrowser(Il2CppString* url)
+bool LaunchProfileBrowser(void* url)
 {
-  if (!url)
-    return false;
-  std::wstring address(reinterpret_cast<const wchar_t*>(url->chars), url->length);
-  if (!address.starts_with(L"https://") || address.find_first_of(L"\"\r\n\t ") != std::wstring::npos)
-    return false;
-
-  if (HasForcedEdgeUserDataDir())
-    return false;
-  const auto local_app_data = KnownFolder(FOLDERID_LocalAppData);
-  if (local_app_data.empty())
-    return false;
-  std::filesystem::path browser;
-  for (const auto* folder_id : {&FOLDERID_ProgramFilesX86, &FOLDERID_ProgramFiles, &FOLDERID_LocalAppData}) {
-    const auto base = KnownFolder(*folder_id);
-    if (base.empty())
-      continue;
-    const auto candidate = std::filesystem::path(base) / L"Microsoft" / L"Edge" / L"Application" / L"msedge.exe";
-    if (std::filesystem::is_regular_file(candidate)) {
-      browser = candidate;
-      break;
-    }
-  }
-  if (browser.empty())
-    return false;
-  const auto data_dir = std::filesystem::path(local_app_data) / L"STFC Community Mod" / L"BrowserProfiles" / profile_id;
-  std::filesystem::create_directories(data_dir);
-
-  std::wstring command = L"\"" + browser.wstring() + L"\" --user-data-dir=\"" + data_dir.wstring()
-                         + L"\" --new-window \"" + address + L"\"";
-  STARTUPINFOW startup{sizeof(startup)};
-  PROCESS_INFORMATION process{};
-  const bool started = CreateProcessW(browser.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                                      &startup, &process) != 0;
-  if (started) {
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-  }
-  return started;
+  if (!url) return false;
+  return LaunchIsolatedBrowser(profile_root,profile_id,RequiredString(url));
 }
 
-bool PresentUrl_Hook(auto, void*, Il2CppString* url)
+bool PresentUrl_Hook(auto, void*, void* url)
 {
   try {
     if (LaunchProfileBrowser(url))
@@ -226,26 +172,24 @@ bool PresentUrl_Hook(auto, void*, Il2CppString* url)
   FailClosed("Could not open the isolated sign-in browser");
 }
 
-void* Resolve(Il2CppClass* cls, const char* name, const char* result, std::initializer_list<const char*> args)
+void* Resolve(void* cls, const char* name, const char* result, std::initializer_list<const char*> args)
 {
-  return method_contract::Pointer(method_contract::Resolve(cls, name, true, result, args));
+  return runtime->Resolve(cls,name,true,result,args);
 }
 
 } // namespace
 
-void PrepareProfile(std::wstring_view id, ProfileOpenMode mode)
+void PrepareProfile(const std::filesystem::path& root, std::string_view id,
+                    ProfileOpenMode mode, SessionLease& lease)
 {
-  if (profile_store)
-    FailClosed("Profile preference store was already prepared");
+  if (profile_store) FailClosed("Profile preference store was already prepared");
+  profile_root = root;
   profile_id = id;
-  const auto local_app_data = KnownFolder(FOLDERID_LocalAppData);
-  if (local_app_data.empty())
-    FailClosed("Local app data is unavailable");
+  profile_lease = &lease;
   try {
-    profile_store = std::make_unique<ProfilePrefsStore>(local_app_data, profile_id, mode);
-  } catch (...) {
-    FailClosed("Could not open the isolated preference store");
-  }
+    profile_store = std::make_unique<ProfilePrefsStore>(root,id,mode,lease);
+  } catch (const std::exception& error) { FailClosed(error.what()); }
+  catch (...) { FailClosed("Could not open the isolated preference store"); }
 }
 
 void InstallProfileHooks()
@@ -253,31 +197,36 @@ void InstallProfileHooks()
   if (!profile_store)
     FailClosed("Profile preference store was not prepared");
 
-  auto prefs = il2cpp_get_class_helper("UnityEngine.CoreModule", "UnityEngine", "PlayerPrefs");
-  auto oidc = il2cpp_get_class_helper("Playgami.Sdk.Identity.Runtime", "Playgami.Identity.Api.Internal",
-                                     "OidcAuthorizer");
-  if (!prefs.get_cls() || !oidc.get_cls())
-    FailClosed("Required profile classes are unavailable");
+  if (runtime) FailClosed("Profile hooks were already installed");
+  try { runtime=std::make_unique<detail::RuntimeApi>(); }
+  catch (const std::exception& error) { FailClosed(error.what()); }
+  void* prefs=nullptr;
+  void* oidc=nullptr;
+  try {
+    prefs=runtime->Class("UnityEngine.CoreModule","UnityEngine","PlayerPrefs");
+    oidc=runtime->Class("Playgami.Sdk.Identity.Runtime","Playgami.Identity.Api.Internal","OidcAuthorizer");
+  } catch (const std::exception& error) { FailClosed(error.what()); }
+  if (!prefs || !oidc) FailClosed("Required profile classes are unavailable");
 
   const std::array<void*, 10> pref_methods = {
-      Resolve(prefs.get_cls(), "TrySetInt", "System.Boolean", {"System.String", "System.Int32"}),
-      Resolve(prefs.get_cls(), "TrySetFloat", "System.Boolean", {"System.String", "System.Single"}),
-      Resolve(prefs.get_cls(), "TrySetSetString", "System.Boolean", {"System.String", "System.String"}),
-      Resolve(prefs.get_cls(), "GetInt", "System.Int32", {"System.String", "System.Int32"}),
-      Resolve(prefs.get_cls(), "GetFloat", "System.Single", {"System.String", "System.Single"}),
-      Resolve(prefs.get_cls(), "GetString", "System.String", {"System.String", "System.String"}),
-      Resolve(prefs.get_cls(), "HasKey", "System.Boolean", {"System.String"}),
-      Resolve(prefs.get_cls(), "DeleteKey", "System.Void", {"System.String"}),
-      Resolve(prefs.get_cls(), "DeleteAll", "System.Void", {}),
-      Resolve(prefs.get_cls(), "Save", "System.Void", {}),
+      Resolve(prefs, "TrySetInt", "System.Boolean", {"System.String", "System.Int32"}),
+      Resolve(prefs, "TrySetFloat", "System.Boolean", {"System.String", "System.Single"}),
+      Resolve(prefs, "TrySetSetString", "System.Boolean", {"System.String", "System.String"}),
+      Resolve(prefs, "GetInt", "System.Int32", {"System.String", "System.Int32"}),
+      Resolve(prefs, "GetFloat", "System.Single", {"System.String", "System.Single"}),
+      Resolve(prefs, "GetString", "System.String", {"System.String", "System.String"}),
+      Resolve(prefs, "HasKey", "System.Boolean", {"System.String"}),
+      Resolve(prefs, "DeleteKey", "System.Void", {"System.String"}),
+      Resolve(prefs, "DeleteAll", "System.Void", {}),
+      Resolve(prefs, "Save", "System.Void", {}),
   };
   const std::array<void*, 3> browser_methods = {
-      method_contract::Pointer(method_contract::Resolve(oidc.get_cls(), "PresentLoginUrlToUser", false,
-                                                        "System.Boolean", {"System.String"})),
-      method_contract::Pointer(method_contract::Resolve(oidc.get_cls(), "PresentLogoutUrlToUser", false,
-                                                        "System.Boolean", {"System.String"})),
-      method_contract::Pointer(method_contract::Resolve(oidc.get_cls(), "PresentLinkUrlToUser", false,
-                                                        "System.Boolean", {"System.String"})),
+      runtime->Resolve(oidc, "PresentLoginUrlToUser", false,
+                                                        "System.Boolean", {"System.String"}),
+      runtime->Resolve(oidc, "PresentLogoutUrlToUser", false,
+                                                        "System.Boolean", {"System.String"}),
+      runtime->Resolve(oidc, "PresentLinkUrlToUser", false,
+                                                        "System.Boolean", {"System.String"}),
   };
   for (auto* method : pref_methods)
     if (!method)
@@ -289,7 +238,11 @@ void InstallProfileHooks()
   // The pinned SPUD installer resolves x64 jump thunks before patching.
   static_assert(sizeof(void*) == 8);
   const auto canonical_target = [](void* method) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return spud::detail::arm64::maybe_resolve_jump(reinterpret_cast<uintptr_t>(method));
+#else
     return spud::detail::x64::maybe_resolve_jump(reinterpret_cast<uintptr_t>(method));
+#endif
   };
   std::array<uintptr_t, pref_methods.size() + browser_methods.size()> targets{};
   std::transform(pref_methods.begin(), pref_methods.end(), targets.begin(), canonical_target);
@@ -320,6 +273,7 @@ void InstallProfileHooks()
   }
   try {
     profile_store->FinishNewProfile();
+    profile_lease->MarkReady();
   } catch (...) {
     FailClosed("Could not finish profile enrollment");
   }
@@ -327,5 +281,3 @@ void InstallProfileHooks()
 }
 
 } // namespace stfc::profiles::community_mod
-
-#endif

@@ -1,4 +1,6 @@
 {
+  "recordKind": "historical-extraction-checkpoint",
+  "scope": "Hashes and destination paths describe the original extraction, not the current source layout. See SOURCE_PROVENANCE.md for later derivations.",
   "sourceRepository": "https://github.com/Guffawaffle/stfc-mod",
   "sourceRevision": "323fb857f51f4cb08231d4b150ea8b5bb59340d1",
   "sourceLicense": "GPL-3.0 license text preserved; no relicensing",
