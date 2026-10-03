@@ -802,12 +802,16 @@ Json Run(const Json& request)
       if(error.Code()!="busy")throw;active=true;
       inspection=std::make_unique<InstallationLease>(root,game,false,true);
     }
+    if(inspection->Directory()!=game)
+      Fail("installation_changed","The installation path changed before status admission.");
     if(request.contains("installationPhysicalIdentity")
         && request.at("installationPhysicalIdentity")!=Json(inspection->PhysicalIdentity()))
       Fail("installation_changed","The installation directory changed before status admission.");
     return Json{{"apiVersion",1},{"ok",true},{"installation",Snapshot(game,transaction,active)}};
   }
   const bool mutation=operation=="update-game"||operation=="recover-game-update";InstallationLease lease(root,game,mutation);
+  if(lease.Directory()!=game)
+    Fail("installation_changed","The installation path changed before operation admission.");
   if (request.contains("installationPhysicalIdentity")
       && request.at("installationPhysicalIdentity")!=Json(lease.PhysicalIdentity()))
     Fail("installation_changed","The installation directory changed before operation admission.");

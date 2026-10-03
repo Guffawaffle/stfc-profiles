@@ -107,7 +107,10 @@ stopped-process checks and recovery boundaries remain in force.
 On Windows an admitted installation lease retains the canonical directory and
 its ancestors without delete sharing through the operation. Renaming or replacing
 that directory chain is refused until the lease ends; game files can still be
-updated within it. ID-bound maintenance forwards the registered physical identity
+updated within it. Lease admission requires the canonical spelling used by the
+caller to match the retained directory; it rejects aliases introduced between
+selection and acquisition. Registration resolves legitimate aliases first.
+ID-bound maintenance forwards the registered physical identity
 and compares it after handles are acquired, before network or mutation work.
 Status keeps the handles through its snapshot, including an observation-only
 mode during a coordinated update. Observation mode does not own the update lock.

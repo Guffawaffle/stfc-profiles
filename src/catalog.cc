@@ -902,6 +902,11 @@ InstallationLease::InstallationLease(const fs::path& requested, const fs::path& 
     Fail("invalid_installation", "The game path cannot contain an embedded NUL character.");
   impl_->directory = fs::canonical(game);
 #if _WIN32
+  auto supplied=WindowsPathName(game.lexically_normal());
+  while(supplied!=supplied.root_path() && supplied.filename().empty()) supplied=supplied.parent_path();
+  const auto retained=WindowsPathName(impl_->directory);
+  if(CompareStringOrdinal(supplied.c_str(),-1,retained.c_str(),-1,TRUE)!=CSTR_EQUAL)
+    Fail("installation_changed","Select the installation's canonical directory before acquiring operation access.");
   std::vector<fs::path> ancestors;
   for (auto path=impl_->directory;;path=path.parent_path()) {
     ancestors.push_back(path);
