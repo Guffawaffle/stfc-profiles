@@ -372,7 +372,8 @@ int Run(const std::vector<std::string>& input)
         Json lookup{{"operation","installation-paths"},{"installationId",args.values.at("--installation")}};
         if (args.values.contains("--root")) lookup["root"]=args.values.at("--root");
         const auto registered=Call(lookup);
-        if (!registered.value("ok",false) || registered.at("installation").at("state")!="available")
+        const bool recovery = args.operation == "installation-status" || args.operation == "recover-game-update";
+        if (!registered.value("ok",false) || (!recovery && registered.at("installation").at("state")!="available"))
           throw std::runtime_error("the selected installation is missing, changed or unavailable; choose it explicitly");
         if (!args.values.contains("--game")) args.values["--game"]=registered.at("installation").at("gameDirectory").get<std::string>();
       }

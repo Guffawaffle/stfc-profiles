@@ -1,6 +1,7 @@
 // Compile the production updater in this test TU to exercise its private crash
 // checkpoints without making synthetic URLs or interruption controls public API.
 #include "../src/installation.cc"
+#include <stfc_profiles/catalog.h>
 #include <iostream>
 using namespace stfc::profiles;
 using namespace stfc::profiles::installation_detail;
@@ -146,6 +147,31 @@ void PreJournalRecovery(){
   Check(status.value("ok",false)&&status.at("installation").at("requiresRecovery")==true,"Empty pre-journal interruption was hidden");
   const auto result=f.Call("recover-game-update");Check(result.value("ok",false),"Empty orphan could not be recovered");f.Original();Check(!fs::exists(f.transaction),"Recovered empty orphan still blocks installation");
 }
+void RegisteredRecovery(){
+  Fixture f;
+  auto registered=Json::parse(ExecuteCatalogRequest(Json{{"apiVersion",2},{"operation","register-installation"},
+      {"root",Utf8(f.catalog)},{"name","Interrupted game"},{"gameDirectory",Utf8(f.game)}}.dump()));
+  Check(registered.value("ok",false),registered.dump().c_str());
+  const auto id=registered.at("installation").at("id");
+  auto journal=f.Stage();
+  Throws([&]{Commit(f.game,f.transaction,f.ownership,journal,[](std::string_view point){
+      if(point=="backup")throw std::runtime_error("interrupted registered image");});},"No interruption");
+  Check(!fs::exists(f.game/"prime.exe"),"Fixture did not remove executable");
+  auto call=[&](const char* operation){return Json::parse(ExecuteCatalogRequest(Json{{"apiVersion",2},
+      {"operation",operation},{"root",Utf8(f.catalog)},{"installationId",id}}.dump()));};
+  const auto status=call("installation-status");
+  Check(status.value("ok",false)&&status.at("installation").at("requiresRecovery")==true,
+        "Registered status hid incomplete-image recovery");
+  Check(!call("check-game-update").value("ok",false),"Incomplete registered image reached update check");
+  const auto recovered=call("recover-game-update");
+  Check(recovered.value("ok",false),recovered.dump().c_str());f.Original();
+  fs::rename(f.game,f.root/"original-game");fs::create_directory(f.game);
+  for(const auto* operation:{"installation-status","recover-game-update"}){
+    const auto replaced=call(operation);
+    Check(!replaced.value("ok",false)&&replaced.at("error").at("code")=="installation_changed",
+          "Recovery followed a replacement physical directory");
+  }
+}
 Json InterruptedImage(Fixture& fixture){
   auto journal=fixture.Stage();Throws([&]{Commit(fixture.game,fixture.transaction,fixture.ownership,journal,[](std::string_view point){if(point=="verified")throw std::runtime_error("interrupted image");});},"No completed-image interruption");return journal;
 }
@@ -196,7 +222,7 @@ void OwnershipAndApi(){
 #endif
 int main(){try{
 #if _WIN32
-  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RecoveryFinalization();
+  ParsersAndPieces();ExtractSafety();CrashRecovery();GateAndConflicts();OwnershipAndApi();ReviewRegressions();PreJournalRecovery();RegisteredRecovery();RecoveryFinalization();
   std::cout<<"Installation fixtures passed: official protocol, torrent integrity, safe extraction, crash recovery, preserved extras, executable gate and cross-root exclusion\n";
 #else
   std::cout<<"Direct updater is Windows-only; runtime qualification required on this platform\n";

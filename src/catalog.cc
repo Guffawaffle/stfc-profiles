@@ -365,13 +365,15 @@ void ValidateInstallationImage(const fs::path& game)
     Fail("invalid_installation", "Choose an STFC game folder with a valid client version marker.");
 }
 struct InstallationEntry { Json metadata, projection; fs::path directory; std::string revision; };
-InstallationEntry RegisteredInstallation(const fs::path& root, std::string_view id, bool require_available = false)
+InstallationEntry RegisteredInstallation(const fs::path& root, std::string_view id, bool require_available = false,
+                                        bool allow_incomplete_image = false)
 {
   ValidateId(id);
   const auto directory = root / "installations" / id;
   if (!fs::exists(directory)) Fail("installation_missing", "The selected installation registration was not found.");
   Plain(directory,true); const auto raw = Read(directory / "metadata.json"); const auto metadata = Parse(raw);
-  if (!metadata.is_object() || metadata.value("schemaVersion",0) != 1
+  if (!metadata.is_object() || !metadata.contains("schemaVersion")
+      || !metadata["schemaVersion"].is_number_integer() || metadata["schemaVersion"] != Json(1)
       || !metadata.contains("name") || !metadata["name"].is_string()
       || !metadata.contains("gameDirectory") || !metadata["gameDirectory"].is_string()
       || !metadata.contains("physicalIdentity") || !metadata["physicalIdentity"].is_string()
@@ -385,13 +387,20 @@ InstallationEntry RegisteredInstallation(const fs::path& root, std::string_view 
     if (item.path().filename() != "metadata.json")
       Fail("interrupted_write", "Installation metadata has an interrupted or unknown file. Inspect it before continuing.");
   std::string state = "unknown", message;
+  bool identity_verified = false;
   try {
     const auto observed = ObserveInstallation(game);
     if (observed.identity != metadata.at("physicalIdentity").get<std::string>())
       Fail("installation_changed", "The directory at the registered path has changed. Choose or register the intended installation explicitly.");
+    identity_verified = true;
     ValidateInstallationImage(observed.directory);
     state = "available";
-  } catch (const CatalogError& error) { if (require_available) throw; message = error.what(); }
+  } catch (const CatalogError& error) {
+    // Recovery must reach its journal when an interrupted commit has removed
+    // image files, but it must still identify the original physical directory.
+    if (require_available && (!allow_incomplete_image || !identity_verified)) throw;
+    message = error.what();
+  }
   const auto revision = Hash(raw);
   Json projection{{"id",id},{"name",metadata.at("name")},{"gameDirectory",metadata.at("gameDirectory")},
       {"physicalIdentity",metadata.at("physicalIdentity").get<std::string>()},{"revision",revision},{"state",state}};
@@ -446,11 +455,12 @@ Json RegisterInstallation(const fs::path& root, const Json& request)
   fs::rename(staging,destination);
   return {{"apiVersion",2},{"ok",true},{"installation",RegisteredInstallation(root,id,true).projection},{"created",true}};
 }
-std::string SelectedGame(const fs::path& root, const Json& request, const Json& metadata)
+std::string SelectedGame(const fs::path& root, const Json& request, const Json& metadata,
+                         bool allow_incomplete_image = false)
 {
   const auto selected = request.value("installationId", request.contains("gameDirectory") ? std::string{} : metadata.value("preferredInstallationId",std::string{}));
   if (!selected.empty()) {
-    const auto entry=RegisteredInstallation(root,selected,true);
+    const auto entry=RegisteredInstallation(root,selected,true,allow_incomplete_image);
     const auto game=entry.metadata.at("gameDirectory").get<std::string>();
     if (request.contains("gameDirectory") && ObserveInstallation(Path(request.at("gameDirectory").get<std::string>())).identity != entry.metadata.at("physicalIdentity").get<std::string>())
       Fail("installation_changed", "The explicit game path does not match the selected installation registration.");
@@ -1007,7 +1017,8 @@ static std::string ExecuteCatalogRequestInternal(std::string_view request_utf8)
         if (api_version != 2) Fail("api_version", "Installation registration requires typed catalog API version 2.");
         const auto root=CatalogRoot(request.contains("root")?Path(request.at("root").get<std::string>()):DefaultCatalogRoot());
         Lock catalog(root / ".locks" / "catalog.lock",false,true);
-        installation_request["gameDirectory"]=SelectedGame(root,request,Json::object());
+        const bool recovery = operation == "installation-status" || operation == "recover-game-update";
+        installation_request["gameDirectory"]=SelectedGame(root,request,Json::object(),recovery);
       }
       return ExecuteInstallationRequest(installation_request.dump());
     }

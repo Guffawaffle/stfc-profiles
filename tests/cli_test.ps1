@@ -125,6 +125,11 @@ try {
     Invoke-ProfileCli -CliArguments @('edit','--profile','default','--installation',$registrationId) | Out-Null
     Invoke-ProfileCli -CliArguments @('game','status','--profile','default') | Out-Null
     Invoke-ProfileCli -CliArguments @('game','status','--installation',$registrationId) | Out-Null
+    Remove-Item -LiteralPath (Join-Path $syntheticGame 'prime.exe')
+    Invoke-ProfileCli -CliArguments @('game','status','--installation',$registrationId) | Out-Null
+    Invoke-ProfileCli -CliArguments @('game','recover','--installation',$registrationId) | Out-Null
+    Invoke-ProfileCli -CliArguments @('game','check','--installation',$registrationId) -ExpectedSuccess $false | Out-Null
+    [IO.File]::WriteAllText((Join-Path $syntheticGame 'prime.exe'),'synthetic')
     Rename-Item -LiteralPath $syntheticGame -NewName 'moved-cli-game'
     $staleRegistration = Invoke-ProfileCli -CliArguments @('installation-paths','--installation',$registrationId)
     if ($staleRegistration.installation.state -ne 'unknown') { throw 'CLI silently repaired a moved installation.' }

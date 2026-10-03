@@ -122,6 +122,18 @@ void InstallationRegistrationsBindPhysicalDirectories()
   auto registered=f.Call({{"apiVersion",2},{"operation","register-installation"},{"name","Primary"},{"gameDirectory",game.string()}});
   Check(registered.value("ok",false) && registered.at("created")==true,registered.dump());
   const auto installation=registered.at("installation");const auto id=installation.at("id").get<std::string>();
+  const auto registration_file=f.root/"installations"/id/"metadata.json";
+  std::ifstream registration_input(registration_file,std::ios::binary);
+  const std::string registration_bytes{std::istreambuf_iterator<char>(registration_input),{}};
+  registration_input.close();
+  for(const auto& version:{Json(1.5),Json(std::uint64_t{4294967297})}){
+    auto malformed=Json::parse(registration_bytes);malformed["schemaVersion"]=version;
+    std::ofstream(registration_file,std::ios::binary)<<malformed.dump();
+    const auto refused=f.Call({{"apiVersion",2},{"operation","installation-paths"},{"installationId",id}});
+    Check(!refused.value("ok",false)&&refused.at("error").at("code")=="invalid_metadata",
+          "Unsupported numeric installation schema was coerced to version one");
+  }
+  std::ofstream(registration_file,std::ios::binary)<<registration_bytes;
   Check(ValidId(id) && installation.at("state")=="available" && installation.at("physicalIdentity").get<std::string>().size()==64,"installation lacks stable physical binding");
   auto alias=(game/"..").lexically_normal()/game.filename();
   auto alias_name=alias.wstring();for (auto& ch:alias_name) ch=std::towupper(ch);
