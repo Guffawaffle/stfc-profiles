@@ -1,323 +1,268 @@
-// Extracted from Guffawaffle/stfc-mod at 323fb857f51f4cb08231d4b150ea8b5bb59340d1.
-// See docs/PROVENANCE.json and LICENSE (GPL-3.0).
-#include "stfc_profiles/windows/prefs_store.h"
-
-#include <Windows.h>
-
-using namespace stfc::profiles::windows;
-
+#include "stfc_profiles/catalog.h"
+#include "stfc_profiles/prefs_store.h"
+#include "stfc_profiles/session.h"
+#include "../src/prefs_crypto.h"
+#include <nlohmann/json.hpp>
 #include <bit>
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <system_error>
-
+#include <vector>
+#if _WIN32
+#include <Windows.h>
+#else
+#include <cstdlib>
+#include <unistd.h>
+#endif
+using namespace stfc::profiles;
+using Json=nlohmann::json;
 namespace {
-
-namespace fs = std::filesystem;
-
-void Check(bool condition, std::string_view message)
+namespace fs=std::filesystem;
+void Check(bool condition,const char* message) { if (!condition) throw std::runtime_error(message); }
+template<class Action> void Throws(Action action,const char* message)
+{ try { action(); } catch (const std::exception&) { return; } throw std::runtime_error(message); }
+std::string Bytes(const fs::path& file)
 {
-  if (!condition)
-    throw std::runtime_error(std::string(message));
+  std::ifstream input(file,std::ios::binary);
+  Check(input.is_open(),"synthetic preferences are unavailable");
+  return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
 }
-
-template <typename Action>
-void CheckThrows(Action&& action, std::string_view message)
-{
-  try {
-    action();
-  } catch (const std::exception&) {
-    return;
+struct Fixture {
+  fs::path root;
+  std::vector<std::string> created_ids;
+  Fixture() {
+#if _WIN32
+    wchar_t directory[MAX_PATH+1]{},file[MAX_PATH+1]{};
+    auto length=GetTempPathW(MAX_PATH+1,directory);
+    Check(length>0 && length<=MAX_PATH,"temporary directory unavailable");
+    Check(GetTempFileNameW(directory,L"spp",0,file)!=0,"temporary path unavailable");
+    root=file; fs::remove(root); fs::create_directory(root);
+#else
+    char directory[]="/tmp/stfc-profiles-prefs-XXXXXX";
+    Check(mkdtemp(directory)!=nullptr,"temporary directory unavailable"); root=directory;
+#endif
   }
-  throw std::runtime_error(std::string(message));
-}
-
-std::string ReadBytes(const fs::path& path)
-{
-  std::ifstream file(path, std::ios::binary);
-  Check(file.is_open(), "could not read synthetic preferences");
-  return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-}
-
-class TemporaryDirectory
-{
-public:
-  TemporaryDirectory()
-  {
-    wchar_t temp_path[MAX_PATH + 1]{};
-    const DWORD length = GetTempPathW(MAX_PATH + 1, temp_path);
-    if (length == 0 || length > MAX_PATH)
-      throw std::runtime_error("could not locate the temporary directory");
-
-    wchar_t unique_path[MAX_PATH + 1]{};
-    if (!GetTempFileNameW(temp_path, L"sps", 0, unique_path))
-      throw std::runtime_error("could not allocate a temporary test path");
-    path_ = unique_path;
-    fs::remove(path_);
-    fs::create_directory(path_);
+  ~Fixture() {
+#if __APPLE__
+    for (const auto& id:created_ids) { try { detail::EraseProtectedPrefsIdentity(id); } catch (...) {} }
+#endif
+    std::error_code error; fs::remove_all(root,error);
   }
-
-  ~TemporaryDirectory()
-  {
-    std::error_code error;
-    fs::remove_all(path_, error);
+  Json Request(Json request) {
+    request["apiVersion"]=1;
+    const auto path=root.u8string(); request["root"]=std::string(path.begin(),path.end());
+    if ((request.at("operation")=="archive" || request.at("operation")=="restore" || request.at("operation")=="delete")
+        && !request.contains("expectedRevision")) {
+      Json query{{"apiVersion",1},{"root",request.at("root")},{"operation","list"},
+                 {"archived",request.at("operation")=="restore" || request.value("archived",false)}};
+      const auto catalog=Json::parse(ExecuteCatalogRequest(query.dump()));
+      for (const auto& profile:catalog.at("profiles"))
+        if (profile.at("id")==request.at("id")) request["expectedRevision"]=profile.at("revision");
+    }
+    return Json::parse(ExecuteCatalogRequest(request.dump()));
   }
-
-  TemporaryDirectory(const TemporaryDirectory&)            = delete;
-  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-  const fs::path& Path() const
-  { return path_; }
-
-  fs::path PrefsPath(std::wstring_view id) const
-  { return path_ / L"STFC Community Mod" / L"Profiles" / std::wstring(id) / L"player_prefs.bin"; }
-
-private:
-  fs::path path_;
+  std::string Create(const char* name) {
+    auto response=Request({{"operation","create"},{"name",name}});
+    Check(response.value("ok",false),response.dump().c_str());
+    auto id=response.at("profile").at("id").get<std::string>();created_ids.push_back(id);return id;
+  }
+  fs::path File(std::string_view id) const { return root/"profiles"/std::string(id)/"player_prefs.bin"; }
 };
-
-void NewProfilePersistsAndExistingReopens()
+void PersistenceAndEncryption()
 {
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"josep");
+  Fixture f; const auto id=f.Create("Synthetic Science");
   {
-    ProfilePrefsStore fresh(temp.Path(), L"josep", ProfileOpenMode::New);
-    Check(!fs::exists(file), "new profile must wait for explicit initialization");
-    fresh.FinishNewProfile();
-    Check(fs::is_regular_file(file), "new profile did not create player_prefs.bin");
-    fresh.SetInt(u"synthetic-int", 42);
-    fresh.SetFloat(u"synthetic-float", 1.25f);
-    fresh.SetString(u"synthetic-string", u"test value");
+    SessionLease lease(f.root,id);
+    ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    Check(!fs::exists(f.File(id)),"first use committed before hook readiness");
+    store.FinishNewProfile();
+    store.SetInt(u"int",42); store.SetFloat(u"float",-0.0f);
+    store.SetString(u"token",u"SYNTHETIC_SECRET_12345");
+    lease.MarkReady();
+    Check(Bytes(f.File(id)).find("SYNTHETIC_SECRET_12345")==std::string::npos,"secret appeared as plaintext");
   }
+  SessionLease lease(f.root,id);
+  Check(lease.PreferencesInitialized(),"successful initialization was not bound to profile metadata");
+  ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+  Check(store.GetInt(u"int",-1)==42,"integer lost after reopen");
+  Check(std::bit_cast<std::uint32_t>(store.GetFloat(u"float",1.0f))==std::bit_cast<std::uint32_t>(-0.0f),"float bits lost");
+  Check(store.GetString(u"token")==u"SYNTHETIC_SECRET_12345","string lost after reopen");
+  Check(store.GetInt(u"missing",19)==19,"Unity missing-key fallback changed");
+  const auto bytes=Bytes(f.File(id)); store.SetInt(u"int",42); store.Save();
+  Check(Bytes(f.File(id))==bytes,"unchanged value/save rewrote encrypted data");
+}
+void MissingEstablishedDataNeverReinitializes()
+{
+  Fixture f; const auto id=f.Create("Synthetic Missing");
   {
-    ProfilePrefsStore existing(temp.Path(), L"josep", ProfileOpenMode::Existing);
-    Check(existing.GetInt(u"synthetic-int", -1) == 42, "integer did not survive reopen");
-    Check(existing.GetFloat(u"synthetic-float", -1.0f) == 1.25f, "float did not survive reopen");
-    Check(existing.GetString(u"synthetic-string") == u"test value", "string did not survive reopen");
-    Check(existing.GetInt(u"missing", 19) == 19, "missing integer fallback changed");
+    SessionLease lease(f.root,id); ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    store.FinishNewProfile(); lease.MarkReady();
   }
+  fs::remove(f.File(id)); auto marker=f.File(id);marker+=".initialized"; fs::remove(marker);
+  SessionLease lease(f.root,id);
+  Throws([&]{ ProfilePrefsStore empty(f.root,id,ProfileOpenMode::New,lease); },"metadata allowed replacement enrollment");
+  Throws([&]{ ProfilePrefsStore empty(f.root,id,ProfileOpenMode::Resume,lease); },"metadata allowed empty resume");
+  Throws([&]{ ProfilePrefsStore empty(f.root,id,ProfileOpenMode::Existing,lease); },"missing established data accepted");
+  Check(!fs::exists(f.File(id)),"failure silently recreated account preferences");
+}
+void WrongIdentityAndLeaseRefused()
+{
+  Fixture f; const auto first=f.Create("Synthetic First"),second=f.Create("Synthetic Second");
+  {
+    SessionLease lease(f.root,first); ProfilePrefsStore store(f.root,first,ProfileOpenMode::New,lease);
+    store.SetString(u"secret",u"synthetic one"); lease.MarkReady();
+  }
+  fs::copy_file(f.File(first),f.File(second));
+  SessionLease lease(f.root,second);
+  Throws([&]{ ProfilePrefsStore store(f.root,first,ProfileOpenMode::Existing,lease); },"mismatched lease accepted");
+  Throws([&]{ ProfilePrefsStore store(f.root,second,ProfileOpenMode::Existing,lease); },"cross-ID ciphertext accepted");
+  Check(fs::exists(f.File(second)),"failed cross-ID open destroyed evidence");
+}
+void StableLeaseExcludesWritersAndMoves()
+{
+  Fixture f;const auto first=f.Create("Synthetic A"),second=f.Create("Synthetic B");
+  {
+    SessionLease one(f.root,first),two(f.root,second);
+    ProfilePrefsStore a(f.root,first,ProfileOpenMode::New,one),b(f.root,second,ProfileOpenMode::New,two);
+    a.SetInt(u"account",1);b.SetInt(u"account",2);one.MarkReady();two.MarkReady();
+    Throws([&]{ SessionLease duplicate(f.root,first); },"duplicate writer acquired live profile");
+    const auto result=f.Request({{"operation","archive"},{"id",first}});
+    Check(!result.value("ok",false),"active profile archived beneath writer");
+  }
+  auto archived=f.Request({{"operation","archive"},{"id",first}});
+  Check(archived.value("ok",false),archived.dump().c_str());
+  Check(fs::exists(f.root/"archives"/first/"player_prefs.bin"),"archive lost encrypted data");
+  auto restored=f.Request({{"operation","restore"},{"id",first}});
+  Check(restored.value("ok",false),restored.dump().c_str());
+  SessionLease lease(f.root,first); ProfilePrefsStore a(f.root,first,ProfileOpenMode::Existing,lease);
+  Check(a.GetInt(u"account",0)==1,"archive/restore changed immutable-ID preference identity");
+}
+void RecoveryValidatesBeforeReplacing()
+{
+  Fixture f;const auto id=f.Create("Synthetic Recovery");
+  {
+    SessionLease lease(f.root,id);ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    store.SetInt(u"durable",314);lease.MarkReady();
+  }
+  auto backup=f.File(id);backup+=".bak";fs::rename(f.File(id),backup);
+  auto temporary=f.File(id);temporary+=".tmp.interrupted";std::ofstream(temporary)<<"partial";
+  {
+    SessionLease lease(f.root,id);ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+    Check(store.GetInt(u"durable",0)==314,"committed recovery value lost");
+    Check(!fs::exists(backup) && !fs::exists(temporary),"recovery debris remained");
+  }
+  fs::rename(f.File(id),backup); std::ofstream(backup,std::ios::trunc)<<"invalid ciphertext";
+  SessionLease lease(f.root,id);
+  Throws([&]{ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);},"invalid backup restored");
+  Check(fs::exists(backup) && !fs::exists(f.File(id)),"failed backup validation altered evidence");
+}
+void RootAliasesPreserveLeaseIdentity()
+{
+  Fixture f;const auto id=f.Create("Synthetic Root Alias");
+  auto spelling=f.root;
+#if _WIN32
+  auto native=spelling.native();
+  for (auto& ch:native) if (ch>=L'a' && ch<=L'z') ch-=L'a'-L'A';
+  spelling=fs::path(native);
+#endif
+  SessionLease lease(f.root,id);ProfilePrefsStore store(spelling,id,ProfileOpenMode::New,lease);
+  store.SetInt(u"alias-bound",27);
+  Check(fs::is_regular_file(lease.Directory()/"player_prefs.bin"),"alias store did not use held directory authority");
+  Fixture other;
+  Throws([&]{ProfilePrefsStore wrong(other.root,id,ProfileOpenMode::New,lease);},"different physical root admitted through an existing lease");
+  auto truncated=spelling.native();truncated.push_back(fs::path::value_type{});truncated+=fs::path("different").native();
+  Throws([&]{ProfilePrefsStore wrong(fs::path(truncated),id,ProfileOpenMode::New,lease);},"NUL root spelling admitted through a truncated alias");
+}
+void InterruptedFirstUsePreservesCommittedValues()
+{
+  Fixture f;const auto id=f.Create("Synthetic Interrupted");
+  {
+    SessionLease lease(f.root,id);ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    store.SetInt(u"in-progress",7);
+  }
+  SessionLease lease(f.root,id);ProfilePrefsStore store(f.root,id,ProfileOpenMode::Resume,lease);
+  Check(store.GetInt(u"in-progress",0)==7,"interrupted first use reset committed values");
+  store.FinishNewProfile();lease.MarkReady();
 }
 
-void ResumePreservesCommittedPreferences()
+void EstablishedVersionOneRemainsReadable()
 {
-  TemporaryDirectory temp;
+  Fixture f; const auto id=f.Create("Synthetic Existing v1");
   {
-    ProfilePrefsStore fresh(temp.Path(), L"second", ProfileOpenMode::New);
-    fresh.SetInt(u"synthetic-account", 314);
+    SessionLease lease(f.root,id); ProfilePrefsStore store(f.root,id,ProfileOpenMode::New,lease);
+    store.SetInt(u"existing",314); store.SetFloat(u"decimal",1.75f); store.SetString(u"login",u"SYNTHETIC_V1");
+    lease.MarkReady();
   }
-  {
-    ProfilePrefsStore reopened(temp.Path(), L"second", ProfileOpenMode::Resume);
-    Check(reopened.GetInt(u"synthetic-account", -1) == 314,
-          "Resume replaced an interrupted enrollment's preference store");
-    reopened.FinishNewProfile();
-    Check(reopened.GetInt(u"synthetic-account", -1) == 314,
-          "FinishNewProfile replaced an established preference store");
-  }
+  // Produce a synthetic previous-schema store: the typed layout is unchanged.
+  auto plain=detail::ReadProtectedPrefs(f.File(id),id);
+  Check(plain.size()>12,"synthetic store too short"); plain[8]=1;plain[9]=plain[10]=plain[11]=0;
+  detail::WriteProtectedPrefs(f.File(id),id,plain,true);detail::WipePrefsBytes(plain);
+  SessionLease lease(f.root,id); ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+  Check(store.GetInt(u"existing",0)==314 && store.GetFloat(u"decimal",0)==1.75f
+        && store.GetString(u"login")==u"SYNTHETIC_V1","existing schema1 profile lost during import upgrade");
+  store.SetInt(u"existing",315);
+  Check(store.GetString(u"login")==u"SYNTHETIC_V1","schema upgrade lost existing login");
 }
-
-void ResumeInitializesOnlyAnUntouchedProfile()
+void NativeImportRetainsUnitySemantics()
 {
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"fresh");
+  Fixture f; const auto id=f.Create("Synthetic Imported");
+  const auto directory=f.root/"profiles"/id;
+  const auto staging=f.root/"profiles"/(".import-"+id);
+  fs::create_directory(staging);
+  auto meta=Json::parse(Bytes(directory/"metadata.json"));
+  meta["preferencesInitialized"]=true;
+  std::ofstream(staging/"metadata.json")<<meta.dump();
+  fs::create_directory(staging/"logs");
+  auto double_bytes=[](double value) {
+    const auto bits=std::bit_cast<std::uint64_t>(value);
+    std::vector<std::uint8_t> output;
+    for (unsigned i=0;i<8;++i) output.push_back(static_cast<std::uint8_t>(bits>>(8*i)));
+    return output;
+  };
+  std::vector<NativePreference> native{
+    {u"integer",4,{0xff,0xff,0xff,0xff}},
+    {u"decimal",4,double_bytes(150.25)},
+    {u"ambiguous",3,{65,66,67,0}},
+    {u"unicode",3,{0xf0,0x9f,0x9a,0x80,0}},
+    {u"secret",3,{'S','Y','N','T','H','E','T','I','C','_','I','M','P','O','R','T',0}},
+    {u"zero",3,{}}, {u"ascii-invalid-tail",1,{'A',0,0x80}},
+    {u"permissive",3,{0xc0,0xaf,0}}, {u"byte80",3,{0x80,0}},
+    {u"truncated",3,{0xf0,0}}, {u"cross-nul",3,{0xe2,0}},
+    {u"unknown",7,{1,2,3,4,5}}
+  };
+  Throws([&]{ProfilePrefsStore::CreateImported(directory,id,native);},"published directory accepted as import staging");
+  Throws([&]{ProfilePrefsStore::CreateImported(staging,id,{});},"empty preferences published");
+  ProfilePrefsStore::CreateImported(staging,id,native);
+  Check(Bytes(staging/"player_prefs.bin").find("SYNTHETIC_IMPORT")==std::string::npos,"import secret persisted as plaintext");
+  fs::remove_all(directory); fs::rename(staging,directory);
   {
-    ProfilePrefsStore interrupted(temp.Path(), L"fresh", ProfileOpenMode::Resume);
-    Check(!fs::exists(file), "pre-install store unexpectedly wrote preferences");
+    SessionLease lease(f.root,id);
+    Check(lease.PreferencesInitialized(),"import omitted initialized metadata");
+    ProfilePrefsStore store(f.root,id,ProfileOpenMode::Existing,lease);
+    Check(store.GetInt(u"integer",0)==-1,"native int changed");
+    Check(store.GetFloat(u"decimal",0)==150.25f,"8byte DWORD float truncated");
+    Check(store.GetInt(u"decimal",99)==99,"native int accepted eight bytes");
+    Check(store.GetInt(u"ambiguous",0)==0x00434241 && store.GetString(u"ambiguous")==u"ABC","binary value lost alternate getter interpretation");
+    Check(store.GetString(u"unicode")==u"\U0001f680","native UTF8 Unicode lost");
+    Check(!store.GetString(u"zero") && !store.GetString(u"ascii-invalid-tail"),"native string fallback changed");
+    Check(store.GetString(u"permissive")==u"/" && store.GetString(u"byte80")==u"\u0080","Unity permissive decoding changed");
+    Check(!store.GetString(u"truncated") && store.GetString(u"cross-nul")==u"\u2000","native decoder bound changed");
+    Check(store.HasKey(u"unknown") && !store.GetString(u"unknown"),"unknown native value was dropped");
+    store.SetInt(u"integer",72); store.SetFloat(u"decimal",1.25f);
   }
-  auto temporary = file;
-  temporary += L".tmp.interrupted";
-  {
-    std::ofstream stage(temporary, std::ios::binary);
-    stage << "incomplete first commit";
-  }
-  // An interrupted first launch may leave its lock file, but no committed
-  // preferences or prior-use marker. Its uncommitted staging file can be
-  // discarded without replacing a previously committed value.
-  {
-    ProfilePrefsStore fresh(temp.Path(), L"fresh", ProfileOpenMode::Resume);
-    Check(!fs::exists(file), "first use wrote preferences before hook installation");
-    Check(!fs::exists(temporary), "first-use staging debris was not removed");
-    fresh.FinishNewProfile();
-    Check(fs::is_regular_file(file), "first use did not initialize preferences");
-  }
-  Check(fs::remove(file), "could not remove synthetic preferences for enrollment test");
-  CheckThrows([&] { ProfilePrefsStore lost(temp.Path(), L"fresh", ProfileOpenMode::Resume); },
-              "lost preferences were mistaken for first enrollment");
-  Check(!fs::exists(file), "failed enrollment silently recreated preferences");
+  SessionLease lease(f.root,id); ProfilePrefsStore reopened(f.root,id,ProfileOpenMode::Existing,lease);
+  Check(reopened.GetInt(u"integer",0)==72 && reopened.GetFloat(u"decimal",0)==1.25f,"normal writes failed after import");
+  Check(reopened.GetString(u"secret")==u"SYNTHETIC_IMPORT","imported login lost on save and restart");
 }
-
-void MissingEstablishedPreferencesFailWithoutCreatingABin()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"missing");
-  {
-    ProfilePrefsStore fresh(temp.Path(), L"missing", ProfileOpenMode::New);
-    fresh.FinishNewProfile();
-  }
-  Check(fs::remove(file), "could not remove synthetic preferences for missing-bin test");
-  CheckThrows([&] { ProfilePrefsStore existing(temp.Path(), L"missing", ProfileOpenMode::Existing); },
-              "established profile silently accepted a missing preferences bin");
-  CheckThrows([&] { ProfilePrefsStore re_enrolled(temp.Path(), L"missing", ProfileOpenMode::New); },
-              "new enrollment silently reused an initialized profile ID");
-  Check(!fs::exists(file), "opening an established profile silently recreated its missing bin");
-}
-
-void CompletedBindingCannotCreateAnEmptyStore()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"bound");
-  CheckThrows([&] { ProfilePrefsStore bound(temp.Path(), L"bound", ProfileOpenMode::Existing); },
-              "completed binding accepted an absent preferences directory");
-  Check(!fs::exists(file), "completed binding created an empty preferences bin");
-}
-
-void InterruptedReplacementRestoresValidatedBackup()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"recover");
-  {
-    ProfilePrefsStore fresh(temp.Path(), L"recover", ProfileOpenMode::New);
-    fresh.SetInt(u"durable-value", 42);
-  }
-  auto backup = file;
-  backup += L".bak";
-  auto temporary = file;
-  temporary += L".tmp.interrupted";
-  fs::rename(file, backup);
-  {
-    std::ofstream stage(temporary, std::ios::binary);
-    stage << "incomplete";
-  }
-  {
-    ProfilePrefsStore recovered(temp.Path(), L"recover", ProfileOpenMode::Existing);
-    Check(recovered.GetInt(u"durable-value", -1) == 42, "backup recovery lost committed preferences");
-  }
-  Check(fs::is_regular_file(file), "backup recovery did not restore primary bin");
-  Check(!fs::exists(backup) && !fs::exists(temporary), "backup recovery left transaction debris");
-}
-
-void InvalidBackupRemainsAvailableForManualRecovery()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"bad-backup");
-  fs::create_directories(file.parent_path());
-  auto backup = file;
-  backup += L".bak";
-  {
-    std::ofstream invalid(backup, std::ios::binary);
-    invalid << "not an encrypted profile";
-  }
-  CheckThrows([&] { ProfilePrefsStore recovered(temp.Path(), L"bad-backup", ProfileOpenMode::Existing); },
-              "invalid backup was restored");
-  Check(fs::is_regular_file(backup) && !fs::exists(file), "invalid backup was altered on failed recovery");
-}
-
-void MissingPreferencesFailOnNoOpDeleteKey()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"missing-delete");
-  ProfilePrefsStore store(temp.Path(), L"missing-delete", ProfileOpenMode::New);
-  store.FinishNewProfile();
-  Check(fs::remove(file), "could not remove synthetic preferences for no-op delete test");
-  CheckThrows([&] { store.DeleteKey(u"absent"); }, "no-op DeleteKey accepted a missing preferences bin");
-  Check(!fs::exists(file), "failed no-op DeleteKey silently recreated preferences");
-}
-
-void CopiedPreferencesCannotOpenUnderAnotherId()
-{
-  TemporaryDirectory temp;
-  {
-    ProfilePrefsStore source(temp.Path(), L"josep", ProfileOpenMode::New);
-    source.SetString(u"synthetic-secret", u"only josep can read this");
-  }
-  const auto copied = temp.PrefsPath(L"other");
-  fs::create_directories(copied.parent_path());
-  fs::copy_file(temp.PrefsPath(L"josep"), copied);
-  CheckThrows([&] { ProfilePrefsStore wrong_id(temp.Path(), L"other", ProfileOpenMode::Existing); },
-              "a copied preferences bin opened under a different profile ID");
-  Check(fs::is_regular_file(copied), "failed cross-ID open changed the copied bin");
-}
-
-void NewModeRefusesExistingPreferences()
-{
-  TemporaryDirectory temp;
-  {
-    ProfilePrefsStore original(temp.Path(), L"existing", ProfileOpenMode::New);
-    original.SetInt(u"synthetic-value", 77);
-  }
-  CheckThrows([&] { ProfilePrefsStore duplicate(temp.Path(), L"existing", ProfileOpenMode::New); },
-              "New mode accepted an existing preferences bin");
-  ProfilePrefsStore still_existing(temp.Path(), L"existing", ProfileOpenMode::Existing);
-  Check(still_existing.GetInt(u"synthetic-value", -1) == 77,
-        "failed New open changed existing preferences");
-}
-
-void UnchangedValuesDoNotRewritePreferences()
-{
-  TemporaryDirectory temp;
-  const auto file = temp.PrefsPath(L"repeat");
-  {
-    ProfilePrefsStore store(temp.Path(), L"repeat", ProfileOpenMode::New);
-    store.SetInt(u"count", 7);
-    const auto first = ReadBytes(file);
-    store.SetInt(u"count", 7);
-    Check(ReadBytes(file) == first, "repeated integer rewrote preferences");
-    store.SetInt(u"count", 8);
-    Check(ReadBytes(file) != first, "changed integer did not persist");
-
-    store.SetFloat(u"scale", 0.0f);
-    const auto positive_zero = ReadBytes(file);
-    store.SetFloat(u"scale", 0.0f);
-    Check(ReadBytes(file) == positive_zero, "repeated float rewrote preferences");
-    store.SetFloat(u"scale", -0.0f);
-    Check(ReadBytes(file) != positive_zero, "float sign change did not persist");
-
-    store.SetString(u"label", u"ready");
-    const auto string_value = ReadBytes(file);
-    store.SetString(u"label", u"ready");
-    Check(ReadBytes(file) == string_value, "repeated string rewrote preferences");
-  }
-  {
-    ProfilePrefsStore reopened(temp.Path(), L"repeat", ProfileOpenMode::Existing);
-    Check(reopened.GetInt(u"count", -1) == 8, "changed integer was lost after reopen");
-    Check(std::bit_cast<std::uint32_t>(reopened.GetFloat(u"scale", 1.0f))
-              == std::bit_cast<std::uint32_t>(-0.0f),
-          "float sign change was lost after reopen");
-    Check(reopened.GetString(u"label") == u"ready", "string was lost after reopen");
-    reopened.DeleteAll();
-    const auto empty = ReadBytes(file);
-    reopened.DeleteAll();
-    Check(ReadBytes(file) == empty, "repeated DeleteAll rewrote preferences");
-    Check(fs::remove(file), "could not remove synthetic preferences for missing-bin test");
-    CheckThrows([&] { reopened.DeleteAll(); }, "repeated DeleteAll accepted a missing preferences bin");
-  }
-}
-
 } // namespace
-
 int main()
 {
   try {
-    NewProfilePersistsAndExistingReopens();
-    ResumePreservesCommittedPreferences();
-    ResumeInitializesOnlyAnUntouchedProfile();
-    MissingEstablishedPreferencesFailWithoutCreatingABin();
-    CompletedBindingCannotCreateAnEmptyStore();
-    InterruptedReplacementRestoresValidatedBackup();
-    InvalidBackupRemainsAvailableForManualRecovery();
-    MissingPreferencesFailOnNoOpDeleteKey();
-    CopiedPreferencesCannotOpenUnderAnotherId();
-    NewModeRefusesExistingPreferences();
-    UnchangedValuesDoNotRewritePreferences();
-    std::cout << "profile preference store tests passed\n";
-    return 0;
-  } catch (const std::exception& error) {
-    std::cerr << "profile preference store tests failed: " << error.what() << '\n';
-    return 1;
-  }
+    EstablishedVersionOneRemainsReadable();NativeImportRetainsUnitySemantics();PersistenceAndEncryption();MissingEstablishedDataNeverReinitializes();WrongIdentityAndLeaseRefused();
+    StableLeaseExcludesWritersAndMoves();RecoveryValidatesBeforeReplacing();RootAliasesPreserveLeaseIdentity();InterruptedFirstUsePreservesCommittedValues();
+    std::cout<<"profile preference store tests passed\n";return 0;
+  } catch (const std::exception& error) { std::cerr<<"profile preference tests failed: "<<error.what()<<'\n';return 1; }
 }
