@@ -119,16 +119,21 @@ data in coordination.
 
 ## Implementation sequence
 
-1. Implement resource capture, opaque admission and durable reservation
+1. Add Bridge's explicit post-terminal settlement/custody boundary and portable
+   failure/restart tests. Its existing completion callback must publish locally
+   without fallible work after terminal WAL; filesystem settlement cannot be
+   inserted into that callback. Failed settlement must retain custody/reservation
+   without replaying native work or committed terminal/draft publication.
+2. Implement resource capture, opaque admission and durable reservation
    creation/inspection in Profiles; unqualified host capabilities stay unavailable.
-2. Integrate reservation checks into lifecycle/updater admission, then distinct
+3. Integrate reservation checks into lifecycle/updater admission, then distinct
    recovery admission and explicit settlement.
-3. Export versioned native API and adopt immutable reviewed pins in Bridge and
+4. Export versioned native API and adopt immutable reviewed pins in Bridge and
    configuration-producing runtimes. Save stays unavailable without participation
    and actual native transaction/recovery.
-4. Implement Bridge DocumentOwner with qualified native read, backup/stage,
+5. Implement Bridge DocumentOwner with qualified native read, backup/stage,
    create-new/replace and Restore/recovery primitives.
-5. Independently qualify both native hosts, installed journeys and release
+6. Independently qualify both native hosts, installed journeys and release
    packaging. Portable models supplement actual native observations.
 
 ## Required native falsification cases
