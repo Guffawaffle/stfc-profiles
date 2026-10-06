@@ -31,6 +31,12 @@ Game inspection and update requests follow the
 installation; the shared component owns admission, download/application and
 recovery. CLI integration is documented in [runtime and CLI](RUNTIME_AND_CLI.md).
 
+Configuration Save/Restore and runtime configuration writes need the separate
+[canonical writer admission contract](CONFIGURATION_WRITER_CONTRACT.md), including
+durable reservations that survive process death before or after kernel execution
+admission. That implementation/API is pending. Shared data/installation leases
+and session preference-writer ownership do not provide document writer admission.
+
 ## Game host interface
 
 Compile the sources in `adapters/community_mod/` exactly once and link the
