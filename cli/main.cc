@@ -48,7 +48,7 @@ Arguments Parse(const std::vector<std::string>& input)
     if (argument=="--permanent") { result.permanent=true; continue; }
     if (argument=="--profile" || argument=="--game" || argument=="--game-dir" || argument=="--root"
         || argument=="--output" || argument=="--expected-revision" || argument=="--expected-version"
-        || argument=="--url" || argument=="--ready-fd" || argument=="--user" || argument=="--installation") {
+        || argument=="--url" || argument=="--ready-fd" || argument=="--user" || argument=="--installation" || argument=="--runtime") {
       if (i+1==input.size() || input[i+1].starts_with("--"))
         throw std::runtime_error(argument+" requires a separate value");
       if (!result.values.emplace(argument=="--game-dir"?"--game":argument,input[++i]).second)
@@ -135,6 +135,7 @@ void Help()
            <<"stfc-profiles rename --profile ID NAME\n"
            <<"stfc-profiles edit --profile ID [--game PATH]\n"
            <<"stfc-profiles launch --profile ID [--game PATH]\n"
+           <<"  macOS: --game is the app's Contents/MacOS directory; --runtime is the bundled dylib.\n"
            <<"stfc-profiles sessions\n"
            <<"stfc-profiles location\n"
            <<"stfc-profiles archive --profile ID\n"
@@ -407,6 +408,14 @@ int Run(const std::vector<std::string>& input)
     if (args.operation=="edit" && !args.values.contains("--game") && !args.values.contains("--installation"))
       throw std::runtime_error("edit requires --game PATH; use rename to change the display name");
     Json request{{"operation",args.operation},{"archived",args.archived}};
+    if (args.values.contains("--runtime")) {
+#if __APPLE__
+      if (args.operation!="launch") throw std::runtime_error("--runtime applies only to macOS profile launch");
+      request["runtimeLibrary"]=args.values.at("--runtime");
+#else
+      throw std::runtime_error("--runtime applies only to macOS profile launch");
+#endif
+    }
     if (args.values.contains("--root")) request["root"]=args.values.at("--root");
     if (args.values.contains("--game")) request["gameDirectory"]=args.values.at("--game");
     if (args.values.contains("--installation"))

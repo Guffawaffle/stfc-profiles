@@ -194,7 +194,14 @@ bool LaunchIsolatedBrowser(const std::filesystem::path& root, std::string_view i
   for (auto& arg:arguments) argv.push_back(arg.data());
   argv.push_back(nullptr);
   pid_t child=0;
-  const auto status=posix_spawn(&child,helper.c_str(),nullptr,nullptr,argv.data(),environ);
+  // The helper and browser are separate programs, not game injection hosts.
+  std::vector<std::string> environment;
+  for (auto item=environ;item && *item;++item)
+    if (!std::string_view(*item).starts_with("DYLD_")) environment.emplace_back(*item);
+  std::vector<char*> env;
+  for (auto& item:environment) env.push_back(item.data());
+  env.push_back(nullptr);
+  const auto status=posix_spawn(&child,helper.c_str(),nullptr,nullptr,argv.data(),env.data());
   close(signal_pipe[1]);
   if (status!=0) { close(signal_pipe[0]); return false; }
   struct pollfd descriptor_poll{signal_pipe[0],POLLIN,0};

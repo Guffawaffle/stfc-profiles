@@ -27,6 +27,8 @@ std::filesystem::path DefaultCatalogRoot();
 // windows-user descriptor; ordinary startup never claims isolation readiness.
 // Version 2 also owns installations/register-installation/installation-paths,
 // explicit installationId and revision-bound preferredInstallationId imports.
+// macOS launch additionally requires runtimeLibrary: an absolute profile-aware
+// dylib path. gameDirectory is the selected app's Contents/MacOS directory.
 std::string ExecuteCatalogRequest(std::string_view request_utf8);
 
 } // namespace stfc::profiles

@@ -152,3 +152,21 @@ explanation, then asks Windows to check protected users if needed. The result
 contains only users with STFC data, names/IDs and availability status; it creates
 no profile and contains no login values. Account copying retains its separate
 import review and conditional approval.
+# macOS profiles preview
+
+Named Mac launches are explicit: `launch --profile ID --game
+"/path/Star Trek Fleet Command.app/Contents/MacOS" --runtime
+"/path/libstfc-community-mod.dylib" --json`. The coordinator inspects the runtime's
+native-architecture Mach-O contract without loading it, checks the game's loader
+entitlements, starts a separate suspended executable, publishes its exact process
+identity, then resumes it. Success requires the requested profile's runtime-ready
+receipt and live writer lease. Missing capability fails before game startup.
+
+The complete community-mod preview app bundles `stfc-profiles` beside its dylib;
+the same helper owns isolated Chrome/Edge sign-in. Ordinary launcher Engage remains
+ordinary. A named profile has its own preferences, browser, config and logs under
+`~/Library/Application Support/STFC Profiles/profiles/ID`. It starts fresh and does
+not import the ordinary Mac login. Native launch fixtures qualify injection,
+admission and concurrent distinct sessions; actual STFC/Scopely sign-in still needs
+tester verification. Mac user import, game updating through the profiles CLI and
+configuration writer reservations are separate work.

@@ -23,7 +23,8 @@ extern "C" __declspec(dllexport) const unsigned int STFCProfilesExplicitLaunchCo
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <unistd.h>
-extern "C" __attribute__((visibility("default"))) const unsigned int STFCProfilesExplicitLaunchContractV1=1;
+extern "C" __attribute__((visibility("default"), used, section("__DATA,__stfc_profile")))
+const unsigned int STFCProfilesExplicitLaunchContractV1=1;
 #endif
 namespace {
 std::string requested_id;

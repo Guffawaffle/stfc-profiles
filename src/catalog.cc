@@ -31,6 +31,8 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include "macos/launch.h"
 extern char** environ;
 #endif
 
@@ -827,9 +829,32 @@ Json Launch(const fs::path& root, const Json& request)
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
 #else
-    // macOS loading must be qualified before exposing coordinator launch. The
-    // portable catalog, storage and lease operations remain available.
-    Fail("launch_unqualified", "The macOS explicit runtime loading route has not been qualified.");
+    const auto executable = fs::canonical(game / "Star Trek Fleet Command");
+    Plain(executable, false);
+    if (!request.contains("runtimeLibrary"))
+      Fail("runtime_required", "Choose the bundled Mac profile runtime with --runtime PATH.");
+    const auto supplied = Path(request.at("runtimeLibrary").get<std::string>());
+    if (!supplied.is_absolute()) Fail("runtime_unavailable", "The profile runtime path must be absolute.");
+    Plain(supplied, false);
+    const auto runtime = fs::canonical(supplied);
+    if (!detail::HasMacLaunchContract(runtime))
+      Fail("runtime_unavailable", "The runtime does not support explicit profiles on this Mac architecture.");
+    detail::CheckMacLoaderEntitlements(executable);
+    const auto logs = entry.directory / "logs";
+    if (!fs::exists(logs)) fs::create_directory(logs);
+    Plain(logs, true);
+    const auto log = logs / "Player.log";
+    if (fs::exists(fs::symlink_status(log))) Plain(log, false);
+    const auto child = detail::SpawnMacProfileSuspended(executable, runtime, id, log);
+    try {
+      identity = Process(static_cast<std::uint32_t>(child));
+      if (identity.is_null()) Fail("game_exited", "The Mac game exited during startup.");
+      Publish(root, id, identity, "pending");
+      if (kill(child, SIGCONT) != 0) Fail("launch_failed", "Could not resume the selected Mac game.");
+    } catch (...) {
+      // Only this still-suspended owned child is terminated on publication failure.
+      kill(child, SIGKILL); waitpid(child, nullptr, 0); throw;
+    }
 #endif
   }
   const auto id = request.at("id").get<std::string>();
