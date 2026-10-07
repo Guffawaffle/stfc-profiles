@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -45,6 +46,9 @@ public:
   const std::filesystem::path& Directory() const;
   const std::string& Id() const;
   bool Owns() const noexcept;
+  // macOS publishes the stopped browser group's exact identity before resume.
+  // Durable observation keeps lifecycle operations excluded if its guardian dies.
+  void MarkBrowserStarted(std::uint32_t process_id);
 
 private:
   struct Impl;

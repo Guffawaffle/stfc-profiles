@@ -176,3 +176,10 @@ not import the ordinary Mac login. Native launch fixtures exercise injection,
 admission and concurrent distinct sessions; actual STFC/Scopely sign-in still needs
 tester verification. Mac user import, game updating through the profiles CLI and
 configuration writer reservations are separate work.
+
+Mac sign-in refuses Chrome/Edge `UserDataDir` overrides before spawning. Browser
+group identities are durably published before resume; lifecycle mutations remain
+blocked after guardian death while the browser or its helpers are alive. The
+native launcher holds an exclusive installation lease through the bundled
+`--internal-installation-update` helper while updating. This uses the same lock
+as named and ordinary full-mod game runtimes. The helper releases on stdin EOF.

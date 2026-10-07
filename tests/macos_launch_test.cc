@@ -2,6 +2,8 @@
 #include "stfc_profiles/catalog.h"
 #include "stfc_profiles/prefs_store.h"
 #include "stfc_profiles/session.h"
+#include "stfc_profiles/macos_browser_policy.h"
+#include <CoreFoundation/CoreFoundation.h>
 #include <nlohmann/json.hpp>
 #include <libproc.h>
 #include <signal.h>
@@ -43,6 +45,15 @@ int main(int argc, char** argv)
     Check(mkdtemp(pattern), "fixture directory unavailable");
     const fs::path fixture = fs::canonical(pattern);
     struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{fixture};
+    const auto policy_domain = CFSTR("dev.stfc-profiles.synthetic-browser-policy");
+    struct PolicyCleanup { CFStringRef domain; ~PolicyCleanup() {
+      CFPreferencesSetAppValue(CFSTR("UserDataDir"), nullptr, domain); CFPreferencesAppSynchronize(domain);
+    } } policy_cleanup{policy_domain};
+    Check(MacBrowserAllowsPrivateStore("dev.stfc-profiles.synthetic-browser-policy"), "unmanaged browser rejected");
+    CFPreferencesSetAppValue(CFSTR("UserDataDir"), CFSTR("/synthetic/shared-browser"), policy_domain);
+    CFPreferencesAppSynchronize(policy_domain);
+    Check(!MacBrowserAllowsPrivateStore("dev.stfc-profiles.synthetic-browser-policy"), "browser storage override accepted");
+    CFPreferencesSetAppValue(CFSTR("UserDataDir"), nullptr, policy_domain); CFPreferencesAppSynchronize(policy_domain);
     const auto truncated = fixture / "broken.dylib";
     std::ofstream(truncated) << "not Mach-O";
     Check(!detail::HasMacLaunchContract(truncated), "malformed runtime accepted");
@@ -59,6 +70,35 @@ int main(int argc, char** argv)
     Check(kill(child, SIGCONT) == 0, "resume failed");
     int status = 0; Check(waitpid(child, &status, 0) == child, "child wait failed"); owned.pid = 0;
     Check(WIFEXITED(status) && WEXITSTATUS(status) == 0 && fs::exists(marker), "native injection/arguments failed");
+    const auto browser_root = fixture / "browser-catalog";
+    const auto browser_profile = Call({{"root", browser_root.string()}, {"operation", "create"}, {"name", "Synthetic browser"}}).at("profile");
+    const auto browser_id = browser_profile.at("id").get<std::string>();
+    const auto browser = fork();
+    Check(browser >= 0, "synthetic browser fork failed");
+    if (!browser) {
+      setpgid(0, 0);
+      if (fork() < 0) _exit(190);
+      for (;;) pause();
+    }
+    owned.pid = browser;
+    struct BrowserGroup { pid_t group; ~BrowserGroup() { if (group) kill(-group, SIGKILL); } } browser_group{browser};
+    for (int i = 0; i < 100 && getpgid(browser) != browser; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    { BrowserLease guardian(browser_root, browser_id); guardian.MarkBrowserStarted(browser); }
+    auto archive_request = Json{{"root", browser_root.string()}, {"operation", "archive"}, {"id", browser_id},
+        {"expectedRevision", browser_profile.at("revision")}};
+    Check(!Call(archive_request).value("ok", false), "guardian interruption lost browser exclusion");
+    kill(browser, SIGKILL); waitpid(browser, nullptr, 0); owned.pid = 0;
+    Check(!Call(archive_request).value("ok", false), "browser helper survived leader exit without data protection");
+    kill(-browser, SIGKILL);
+    browser_group.group = 0;
+    Json archived;
+    for (int i = 0; i < 100; ++i) {
+      archived = Call(archive_request);
+      if (archived.value("ok", false)) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    Check(archived.value("ok", false), "exited browser group left permanent lifecycle exclusion: " + archived.dump());
     // Catalog end-to-end uses only ephemeral CI runner state and its synthetic Keychain.
     if (std::getenv("STFC_PROFILES_TEST_KEYCHAIN_DIRECTORY")) {
       const auto game = fixture / "game"; fs::create_directory(game);
@@ -96,10 +136,18 @@ int main(int argc, char** argv)
         Check(created.value("ok", false), created.dump()); profiles.push_back(created.at("profile"));
         const auto id = profiles.back().at("id");
         Json request{{"operation", "launch"}, {"id", id}, {"gameDirectory", game.string()}, {"runtimeLibrary", library.string()}};
+        if (!i) {
+          InstallationLease update(DefaultCatalogRoot(), game, true);
+          Check(!Call(request).value("ok", false), "profile launched during installation update access");
+        }
         const auto launched = Call(request);
         if (launched.contains("processId")) children.push_back(launched.at("processId").get<pid_t>());
         Check(launched.value("ok", false) && launched.at("readiness") == "ready", launched.dump());
         Check(!Call(request).value("ok", false), "duplicate live profile launched");
+        bool update_refused = false;
+        try { InstallationLease update(DefaultCatalogRoot(), game, true); }
+        catch (const CatalogError& error) { update_refused = error.Code() == "busy"; }
+        Check(update_refused, "update access admitted beneath a live profile");
       }
       Check(Call({{"operation", "sessions"}}).at("sessions").size() == 2, "independent sessions missing");
     }
