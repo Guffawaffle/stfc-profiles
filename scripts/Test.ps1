@@ -67,6 +67,12 @@ try {
     Invoke-RecordedXMake -Arguments @('run', 'identity-tests')
     Invoke-RecordedXMake -Arguments @('run', 'prefs-store-tests')
     Invoke-RecordedXMake -Arguments @('run', 'catalog-tests')
+    if ($Platform -eq 'macosx') {
+        $nativeLaunch = Join-Path $taskRoot "build/$Platform/$Architecture/release/mac-launch-tests"
+        & /usr/bin/codesign --force --sign - --entitlements (Join-Path $taskRoot 'tests/macos_launch_entitlements.plist') $nativeLaunch
+        if ($LASTEXITCODE -ne 0) { throw 'Could not sign the synthetic Mac launch fixture' }
+        Invoke-RecordedXMake -Arguments @('run', 'mac-launch-tests', (Join-Path $taskRoot "build/$Platform/$Architecture/release/libmac-launch-fixture.dylib"))
+    }
     if ($Platform -eq 'windows') {
         Invoke-RecordedXMake -Arguments @('run', 'installation-tests')
         Invoke-RecordedXMake -Arguments @('run', 'user-import-source-tests')

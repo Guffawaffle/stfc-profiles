@@ -56,8 +56,8 @@ extern "C" void STFC_PROFILES_CALL stfc_profiles_release_data_lease_v1(void* lea
   delete static_cast<stfc::profiles::BrowserLease*>(lease);
 }
 
-extern "C" int STFC_PROFILES_CALL
-stfc_profiles_acquire_installation_lease_v1(const char* root, const char* game, void** lease, char** error) {
+namespace {
+int AcquireInstallation(const char* root, const char* game, bool exclusive, void** lease, char** error) {
   if (!lease || !error) return 1;
   *lease = nullptr; *error = nullptr;
   if (!game || !*game || strnlen(game, 32769) > 32768
@@ -65,13 +65,24 @@ stfc_profiles_acquire_installation_lease_v1(const char* root, const char* game, 
   try {
     const auto data_root = root && *root ? std::filesystem::u8path(root) : stfc::profiles::DefaultCatalogRoot();
     const auto directory = std::filesystem::u8path(game);
-    auto access = std::make_unique<stfc::profiles::InstallationLease>(data_root, directory, false);
+    auto access = std::make_unique<stfc::profiles::InstallationLease>(data_root, directory, exclusive);
     stfc::profiles::CheckInstallationReady(data_root, access->Directory());
     *lease = access.release(); return 0;
   } catch (const std::exception& failure) {
     try { *error = Copy(failure.what()); } catch (...) {}
     return 2;
   } catch (...) { return 2; }
+}
+}
+
+extern "C" int STFC_PROFILES_CALL
+stfc_profiles_acquire_installation_lease_v1(const char* root, const char* game, void** lease, char** error) {
+  return AcquireInstallation(root, game, false, lease, error);
+}
+
+extern "C" int STFC_PROFILES_CALL
+stfc_profiles_acquire_installation_update_lease_v1(const char* root, const char* game, void** lease, char** error) {
+  return AcquireInstallation(root, game, true, lease, error);
 }
 
 extern "C" void STFC_PROFILES_CALL stfc_profiles_release_installation_lease_v1(void* lease) {

@@ -15,6 +15,20 @@ add_repositories("stfc-profiles-packages " .. path.join(os.scriptdir(), "xmake-p
 add_requires("spdlog", "spud v0.2.0-8")
 includes("xmake/library.lua")
 
+if is_plat("macosx") then
+    target("mac-launch-fixture")
+        set_kind("shared")
+        add_files("tests/macos_launch_fixture.cc")
+    target_end()
+    target("mac-launch-tests")
+        set_kind("binary")
+        add_deps("mac-launch-fixture", {inherit = false})
+        add_deps("stfc-profiles-core")
+        add_files("tests/macos_launch_test.cc", "src/c_api.cc")
+        set_exceptions("cxx")
+    target_end()
+end
+
 for _, entry in ipairs({
     {"identity-tests", "tests/identity_test.cc"},
     {"consumer-smoke", "tests/consumer_smoke.cc"},

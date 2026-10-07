@@ -1,6 +1,7 @@
 #include "stfc_profiles/catalog.h"
 #include "stfc_profiles/session.h"
 #include "stfc_profiles/user_import.h"
+#include "stfc_profiles/macos_browser_policy.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <filesystem>
@@ -48,14 +49,15 @@ Arguments Parse(const std::vector<std::string>& input)
     if (argument=="--permanent") { result.permanent=true; continue; }
     if (argument=="--profile" || argument=="--game" || argument=="--game-dir" || argument=="--root"
         || argument=="--output" || argument=="--expected-revision" || argument=="--expected-version"
-        || argument=="--url" || argument=="--ready-fd" || argument=="--user" || argument=="--installation") {
+        || argument=="--url" || argument=="--ready-fd" || argument=="--user" || argument=="--installation" || argument=="--runtime") {
       if (i+1==input.size() || input[i+1].starts_with("--"))
         throw std::runtime_error(argument+" requires a separate value");
       if (!result.values.emplace(argument=="--game-dir"?"--game":argument,input[++i]).second)
         throw std::runtime_error(argument+" was specified more than once");
       continue;
     }
-    if (argument.starts_with("--") && argument!="--help" && argument!="--internal-browser" && argument!="--internal-user-import")
+    if (argument.starts_with("--") && argument!="--help" && argument!="--internal-browser"
+        && argument!="--internal-user-import")
       throw std::runtime_error("unknown option: "+argument);
     if (result.operation.empty()) result.operation=argument;
     else result.positional.push_back(argument);
@@ -135,6 +137,7 @@ void Help()
            <<"stfc-profiles rename --profile ID NAME\n"
            <<"stfc-profiles edit --profile ID [--game PATH]\n"
            <<"stfc-profiles launch --profile ID [--game PATH]\n"
+           <<"  macOS: --game is the app's Contents/MacOS directory; --runtime is the bundled dylib.\n"
            <<"stfc-profiles sessions\n"
            <<"stfc-profiles location\n"
            <<"stfc-profiles archive --profile ID\n"
@@ -230,21 +233,31 @@ int InternalBrowser(const Arguments& args)
     throw std::runtime_error("isolated browser directory is redirected");
   std::filesystem::create_directory(data);
   std::filesystem::path browser;
-  for (const auto& candidate:{std::filesystem::path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-                             std::filesystem::path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")})
-    if (std::filesystem::is_regular_file(candidate)) { browser=candidate; break; }
-  if (browser.empty()) throw std::runtime_error("Edge or Chrome is required for isolated sign-in");
+  for (const auto& [candidate,domain]:std::vector<std::pair<std::filesystem::path,std::string>>{
+       {"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge","com.microsoft.Edge"},
+       {"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome","com.google.Chrome"}})
+    if (std::filesystem::is_regular_file(candidate) && stfc::profiles::MacBrowserAllowsPrivateStore(domain)) {
+      browser=std::filesystem::canonical(candidate); break;
+    }
+  if (browser.empty()) throw std::runtime_error("Chrome or Edge without a UserDataDir policy override is required for isolated sign-in");
   std::vector<std::string> parts{browser.string(),"--user-data-dir="+data.string(),"--no-first-run",
                                 "--disable-background-mode","--new-window",url};
   std::vector<char*> argv; for (auto& value:parts) argv.push_back(value.data()); argv.push_back(nullptr);
   posix_spawnattr_t attributes;
   if (posix_spawnattr_init(&attributes)!=0) throw std::runtime_error("could not initialize browser spawn");
-  posix_spawnattr_setflags(&attributes,POSIX_SPAWN_SETPGROUP);
-  posix_spawnattr_setpgroup(&attributes,0);
+  if (posix_spawnattr_setflags(&attributes,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_START_SUSPENDED)!=0
+      || posix_spawnattr_setpgroup(&attributes,0)!=0) {
+    posix_spawnattr_destroy(&attributes);
+    throw std::runtime_error("could not prepare browser group admission");
+  }
   pid_t pid=0;
   const auto status=posix_spawn(&pid,browser.c_str(),nullptr,&attributes,argv.data(),environ);
   posix_spawnattr_destroy(&attributes);
   if (status!=0) throw std::runtime_error("could not start isolated browser");
+  try {
+    lease.MarkBrowserStarted(static_cast<std::uint32_t>(pid));
+    if (kill(pid,SIGCONT)!=0) throw std::runtime_error("could not resume isolated browser");
+  } catch (...) { kill(-pid,SIGKILL);waitpid(pid,nullptr,0);throw; }
   const char ready='R';
   if (write(ready_fd,&ready,1)!=1) { kill(-pid,SIGTERM); throw std::runtime_error("browser readiness handoff failed"); }
   close(ready_fd);
@@ -407,6 +420,14 @@ int Run(const std::vector<std::string>& input)
     if (args.operation=="edit" && !args.values.contains("--game") && !args.values.contains("--installation"))
       throw std::runtime_error("edit requires --game PATH; use rename to change the display name");
     Json request{{"operation",args.operation},{"archived",args.archived}};
+    if (args.values.contains("--runtime")) {
+#if __APPLE__
+      if (args.operation!="launch") throw std::runtime_error("--runtime applies only to macOS profile launch");
+      request["runtimeLibrary"]=args.values.at("--runtime");
+#else
+      throw std::runtime_error("--runtime applies only to macOS profile launch");
+#endif
+    }
     if (args.values.contains("--root")) request["root"]=args.values.at("--root");
     if (args.values.contains("--game")) request["gameDirectory"]=args.values.at("--game");
     if (args.values.contains("--installation"))

@@ -30,7 +30,10 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/proc.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include "macos/launch.h"
 extern char** environ;
 #endif
 
@@ -631,6 +634,7 @@ Json Process(std::uint32_t pid)
     if (kill(static_cast<pid_t>(pid), 0) < 0 && errno == ESRCH) return nullptr;
     Fail("process_unobservable", "A session process could not be inspected safely.");
   }
+  if (info.pbi_status == SZOMB) return nullptr;
   char path[PROC_PIDPATHINFO_MAXSIZE]{};
   if (proc_pidpath(static_cast<int>(pid), path, sizeof(path)) <= 0)
     Fail("process_unobservable", "A session executable path could not be inspected safely.");
@@ -672,6 +676,46 @@ void Publish(const fs::path& root, std::string_view id, Json identity, std::stri
   if (!reason.empty()) identity["reason"] = reason;
   Atomic(root / "sessions" / (std::string(id) + ".json"), identity.dump(2) + "\n");
 }
+#if __APPLE__
+bool MacBrowserActive(const fs::path& root, std::string_view id)
+{
+  const auto prefix = "browser-" + std::string(id) + "-";
+  for (const auto& file : fs::directory_iterator(root / ".locks")) {
+    if (!file.path().filename().string().starts_with(prefix)) continue;
+    const auto record = Parse(Read(file.path()));
+    if (!record.is_object() || record.value("apiVersion", Json{}) != 1 || record.value("id", Json{}) != id
+        || !record.contains("processId") || !record["processId"].is_number_unsigned()
+        || !record.contains("started") || !record["started"].is_string()
+        || record["started"].get<std::string>().empty()
+        || !record.contains("executable") || !record["executable"].is_string()
+        || !Path(record["executable"].get<std::string>()).is_absolute())
+      Fail("invalid_browser_session", "The browser identity record needs inspection.");
+    const auto value = record["processId"].get<std::uint64_t>();
+    if (!value || value > std::numeric_limits<std::int32_t>::max()
+        || file.path().filename() != prefix + std::to_string(value) + ".json")
+      Fail("invalid_browser_session", "The browser process group record is malformed.");
+    const auto pid = static_cast<std::uint32_t>(value);
+    if (Same(record, Process(pid))) return true;
+    // The leader can exit while helpers still use its profile. A reused group
+    // is conservatively busy; no process is killed on this observation path.
+    errno = 0;
+    const auto bytes = proc_listpids(PROC_PGRP_ONLY, pid, nullptr, 0);
+    if (bytes < 0 || (!bytes && errno)) Fail("browser_unobservable", "The browser process group could not be inspected.");
+    if (!bytes) continue;
+    std::vector<pid_t> members(bytes / sizeof(pid_t) + 32);
+    errno = 0;
+    const auto observed = proc_listpids(PROC_PGRP_ONLY, pid, members.data(), members.size() * sizeof(pid_t));
+    if (observed < 0 || (!observed && errno) || observed >= members.size() * sizeof(pid_t))
+      Fail("browser_unobservable", "The browser process group could not be inspected completely.");
+    // Do not re-inspect each member: it could fork and exit between the group
+    // snapshot and that inspection, leaving an unobserved helper using the store.
+    // A nonempty snapshot remains busy, including members awaiting reaping.
+    for (std::size_t i = 0; i < observed / sizeof(pid_t); ++i)
+      if (members[i] > 0) return true;
+  }
+  return false;
+}
+#endif
 void Inactive(const fs::path& root, std::string_view id)
 {
   // Caller already owns the writer lock. Only a not-yet-admitted live child
@@ -679,6 +723,10 @@ void Inactive(const fs::path& root, std::string_view id)
   const auto receipt = Receipt(root, id);
   if (!receipt.is_null() && receipt["phase"] == "pending")
     Fail("profile_running", "Wait for this profile's pending launch before changing its directory state.");
+#if __APPLE__
+  if (MacBrowserActive(root, id))
+    Fail("browser_running", "Quit this profile's isolated browser before changing its directory state or relaunching.");
+#endif
 }
 Json Sessions(const fs::path& root)
 {
@@ -827,9 +875,32 @@ Json Launch(const fs::path& root, const Json& request)
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
 #else
-    // macOS loading must be qualified before exposing coordinator launch. The
-    // portable catalog, storage and lease operations remain available.
-    Fail("launch_unqualified", "The macOS explicit runtime loading route has not been qualified.");
+    const auto executable = fs::canonical(game / "Star Trek Fleet Command");
+    Plain(executable, false);
+    if (!request.contains("runtimeLibrary"))
+      Fail("runtime_required", "Choose the bundled Mac profile runtime with --runtime PATH.");
+    const auto supplied = Path(request.at("runtimeLibrary").get<std::string>());
+    if (!supplied.is_absolute()) Fail("runtime_unavailable", "The profile runtime path must be absolute.");
+    Plain(supplied, false);
+    const auto runtime = fs::canonical(supplied);
+    if (!detail::HasMacLaunchContract(runtime))
+      Fail("runtime_unavailable", "The runtime does not support explicit profiles on this Mac architecture.");
+    detail::CheckMacLoaderEntitlements(executable);
+    const auto logs = entry.directory / "logs";
+    if (!fs::exists(logs)) fs::create_directory(logs);
+    Plain(logs, true);
+    const auto log = logs / "Player.log";
+    if (fs::exists(fs::symlink_status(log))) Plain(log, false);
+    const auto child = detail::SpawnMacProfileSuspended(executable, runtime, id, log);
+    try {
+      identity = Process(static_cast<std::uint32_t>(child));
+      if (identity.is_null()) Fail("game_exited", "The Mac game exited during startup.");
+      Publish(root, id, identity, "pending");
+      if (kill(child, SIGCONT) != 0) Fail("launch_failed", "Could not resume the selected Mac game.");
+    } catch (...) {
+      // Only this still-suspended owned child is terminated on publication failure.
+      kill(child, SIGKILL); waitpid(child, nullptr, 0); throw;
+    }
 #endif
   }
   const auto id = request.at("id").get<std::string>();
@@ -1038,6 +1109,22 @@ const fs::path& BrowserLease::Root() const { return impl_->root; }
 const fs::path& BrowserLease::Directory() const { return impl_->directory; }
 const std::string& BrowserLease::Id() const { return impl_->id; }
 bool BrowserLease::Owns() const noexcept { return impl_ && impl_->data.Owns(); }
+void BrowserLease::MarkBrowserStarted(std::uint32_t process_id)
+{
+#if __APPLE__
+  if (!Owns()) Fail("lease_missing", "The browser no longer owns profile data access.");
+  Lock catalog(impl_->root / ".locks" / "catalog.lock", false, true);
+  if (!process_id || process_id > std::numeric_limits<std::int32_t>::max()
+      || getpgid(static_cast<pid_t>(process_id)) != static_cast<pid_t>(process_id))
+    Fail("invalid_browser_session", "The stopped browser must own its process group.");
+  auto identity = Process(process_id);
+  if (identity.is_null()) Fail("browser_exited", "The browser exited before admission.");
+  identity["apiVersion"] = 1; identity["id"] = impl_->id;
+  Atomic(impl_->root / ".locks" / ("browser-" + impl_->id + "-" + std::to_string(process_id) + ".json"), identity.dump(2) + "\n");
+#else
+  Fail("platform_unavailable", "Windows browser ownership uses a kill-on-close job.");
+#endif
+}
 
 static std::string ExecuteCatalogRequestInternal(std::string_view request_utf8)
 {
