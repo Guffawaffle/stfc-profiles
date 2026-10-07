@@ -707,8 +707,11 @@ bool MacBrowserActive(const fs::path& root, std::string_view id)
     const auto observed = proc_listpids(PROC_PGRP_ONLY, pid, members.data(), members.size() * sizeof(pid_t));
     if (observed < 0 || (!observed && errno) || observed >= members.size() * sizeof(pid_t))
       Fail("browser_unobservable", "The browser process group could not be inspected completely.");
+    // Do not re-inspect each member: it could fork and exit between the group
+    // snapshot and that inspection, leaving an unobserved helper using the store.
+    // A nonempty snapshot remains busy, including members awaiting reaping.
     for (std::size_t i = 0; i < observed / sizeof(pid_t); ++i)
-      if (members[i] > 0 && !Process(static_cast<std::uint32_t>(members[i])).is_null()) return true;
+      if (members[i] > 0) return true;
   }
   return false;
 }

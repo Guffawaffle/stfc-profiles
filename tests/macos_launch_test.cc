@@ -3,6 +3,8 @@
 #include "stfc_profiles/prefs_store.h"
 #include "stfc_profiles/session.h"
 #include "stfc_profiles/macos_browser_policy.h"
+#include "stfc_profiles/c_api.h"
+#include "stfc_profiles/installation.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <nlohmann/json.hpp>
 #include <libproc.h>
@@ -137,16 +139,23 @@ int main(int argc, char** argv)
         const auto id = profiles.back().at("id");
         Json request{{"operation", "launch"}, {"id", id}, {"gameDirectory", game.string()}, {"runtimeLibrary", library.string()}};
         if (!i) {
-          InstallationLease update(DefaultCatalogRoot(), game, true);
+          void* update = nullptr;
+          char* error = nullptr;
+          Check(stfc_profiles_acquire_installation_update_lease_v1(nullptr, game.c_str(), &update, &error) == 0
+                && update && !error, "writer-owned update access unavailable");
+          struct Update { void* handle; ~Update() { stfc_profiles_release_installation_lease_v1(handle); } } held{update};
           Check(!Call(request).value("ok", false), "profile launched during installation update access");
         }
         const auto launched = Call(request);
         if (launched.contains("processId")) children.push_back(launched.at("processId").get<pid_t>());
         Check(launched.value("ok", false) && launched.at("readiness") == "ready", launched.dump());
         Check(!Call(request).value("ok", false), "duplicate live profile launched");
-        bool update_refused = false;
-        try { InstallationLease update(DefaultCatalogRoot(), game, true); }
-        catch (const CatalogError& error) { update_refused = error.Code() == "busy"; }
+        void* update = nullptr;
+        char* error = nullptr;
+        const auto result = stfc_profiles_acquire_installation_update_lease_v1(nullptr, game.c_str(), &update, &error);
+        const bool update_refused = result != 0 && !update && error;
+        stfc_profiles_free_v1(error);
+        stfc_profiles_release_installation_lease_v1(update);
         Check(update_refused, "update access admitted beneath a live profile");
       }
       Check(Call({{"operation", "sessions"}}).at("sessions").size() == 2, "independent sessions missing");

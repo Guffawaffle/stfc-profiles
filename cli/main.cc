@@ -57,7 +57,7 @@ Arguments Parse(const std::vector<std::string>& input)
       continue;
     }
     if (argument.starts_with("--") && argument!="--help" && argument!="--internal-browser"
-        && argument!="--internal-user-import" && argument!="--internal-installation-update")
+        && argument!="--internal-user-import")
       throw std::runtime_error("unknown option: "+argument);
     if (result.operation.empty()) result.operation=argument;
     else result.positional.push_back(argument);
@@ -276,16 +276,6 @@ int Run(const std::vector<std::string>& input)
     if (args.operation.empty() || args.operation=="--help" || args.operation=="help") { Help(); return 0; }
 #if ! _WIN32
     if (args.operation=="--internal-browser") return InternalBrowser(args);
-    if (args.operation=="--internal-installation-update") {
-      if (!args.positional.empty() || args.values.size()!=1 || !args.values.contains("--game")
-          || args.archived || args.permanent || args.approve_elevation)
-        throw std::runtime_error("invalid installation update reservation arguments");
-      stfc::profiles::InstallationLease lease(stfc::profiles::DefaultCatalogRoot(),Path(Required(args,"--game")),true);
-      std::cout<<Json{{"apiVersion",2},{"ok",true},{"readiness","reserved"}}.dump()<<std::endl;
-      std::string released;
-      std::getline(std::cin,released); // EOF also releases after launcher termination.
-      return 0;
-    }
 #endif
 #if _WIN32
     if (args.operation=="--internal-user-import") {

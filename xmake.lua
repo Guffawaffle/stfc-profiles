@@ -24,7 +24,7 @@ if is_plat("macosx") then
         set_kind("binary")
         add_deps("mac-launch-fixture", {inherit = false})
         add_deps("stfc-profiles-core")
-        add_files("tests/macos_launch_test.cc")
+        add_files("tests/macos_launch_test.cc", "src/c_api.cc")
         set_exceptions("cxx")
     target_end()
 end

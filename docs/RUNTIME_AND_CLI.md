@@ -180,6 +180,7 @@ configuration writer reservations are separate work.
 Mac sign-in refuses Chrome/Edge `UserDataDir` overrides before spawning. Browser
 group identities are durably published before resume; lifecycle mutations remain
 blocked after guardian death while the browser or its helpers are alive. The
-native launcher holds an exclusive installation lease through the bundled
-`--internal-installation-update` helper while updating. This uses the same lock
-as named and ordinary full-mod game runtimes. The helper releases on stdin EOF.
+native launcher holds an exclusive installation lease in the updater process,
+through `stfc_profiles_acquire_installation_update_lease_v1`. This uses the same lock
+as named and ordinary full-mod game runtimes. Release the handle after all writes;
+updater process termination stops its writes and releases the lease together.

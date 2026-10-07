@@ -36,6 +36,11 @@ STFC_PROFILES_API void STFC_PROFILES_CALL stfc_profiles_release_data_lease_v1(vo
 STFC_PROFILES_API int STFC_PROFILES_CALL
 stfc_profiles_acquire_installation_lease_v1(const char* root_utf8, const char* game_directory_utf8,
                                           void** lease, char** error_utf8);
+// Exclusive update access must be held in the process performing every install
+// mutation. Release through the same installation-lease function below.
+STFC_PROFILES_API int STFC_PROFILES_CALL
+stfc_profiles_acquire_installation_update_lease_v1(const char* root_utf8, const char* game_directory_utf8,
+                                                 void** lease, char** error_utf8);
 STFC_PROFILES_API void STFC_PROFILES_CALL stfc_profiles_release_installation_lease_v1(void* lease);
 
 #ifdef __cplusplus
