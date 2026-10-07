@@ -30,6 +30,7 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/proc.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include "macos/launch.h"
@@ -633,6 +634,7 @@ Json Process(std::uint32_t pid)
     if (kill(static_cast<pid_t>(pid), 0) < 0 && errno == ESRCH) return nullptr;
     Fail("process_unobservable", "A session process could not be inspected safely.");
   }
+  if (info.pbi_status == SZOMB) return nullptr;
   char path[PROC_PIDPATHINFO_MAXSIZE]{};
   if (proc_pidpath(static_cast<int>(pid), path, sizeof(path)) <= 0)
     Fail("process_unobservable", "A session executable path could not be inspected safely.");

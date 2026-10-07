@@ -65,14 +65,24 @@ int main(int argc, char** argv)
       fs::copy_file(fs::canonical(argv[0]), game / "Star Trek Fleet Command");
       detail::CheckMacLoaderEntitlements(game / "Star Trek Fleet Command");
       std::vector<Json> profiles;
+      std::vector<pid_t> children;
       struct Profiles {
         std::vector<Json>& items;
+        std::vector<pid_t>& children;
         ~Profiles() {
+          for (const auto& profile : items)
+            std::ofstream(profile.at("logPath").get<std::string>() + ".stop") << "stop";
+          for (const auto child : children) {
+            bool exited = false;
+            for (int i = 0; i < 100; ++i) {
+              if (waitpid(child, nullptr, WNOHANG) == child) { exited = true; break; }
+              std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!exited) { kill(child, SIGKILL); waitpid(child, nullptr, 0); }
+          }
           for (const auto& profile : items) {
             try {
               const auto id = profile.at("id").get<std::string>();
-              std::ofstream(profile.at("logPath").get<std::string>() + ".stop") << "stop";
-              std::this_thread::sleep_for(std::chrono::milliseconds(300));
               const auto paths = Call({{"operation", "paths"}, {"id", id}});
               const auto archived = Call({{"operation", "archive"}, {"id", id}, {"expectedRevision", paths.at("profile").at("revision")}});
               if (archived.value("ok", false)) Call({{"operation", "delete"}, {"id", id}, {"archived", true},
@@ -80,13 +90,14 @@ int main(int argc, char** argv)
             } catch (...) {}
           }
         }
-      } settle{profiles};
+      } settle{profiles, children};
       for (int i = 0; i < 2; ++i) {
         const auto created = Call({{"operation", "create"}, {"name", "Synthetic Mac launch"}});
         Check(created.value("ok", false), created.dump()); profiles.push_back(created.at("profile"));
         const auto id = profiles.back().at("id");
         Json request{{"operation", "launch"}, {"id", id}, {"gameDirectory", game.string()}, {"runtimeLibrary", library.string()}};
         const auto launched = Call(request);
+        if (launched.contains("processId")) children.push_back(launched.at("processId").get<pid_t>());
         Check(launched.value("ok", false) && launched.at("readiness") == "ready", launched.dump());
         Check(!Call(request).value("ok", false), "duplicate live profile launched");
       }
